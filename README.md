@@ -17,7 +17,7 @@ Amend the kernel on `fused-rmsnorm-kernel` and `git tree propagate` rebases `rms
 
 git-tree also grows and reshapes the tree: create a child branch, split one branch into two, attach or detach a subtree, or rehome a stack whose base merged upstream. See [Reshaping the tree](#reshaping-the-tree) for what each command does to the structure.
 
-By design git-tree is a **light wrapper around plain git** — it automates the bookkeeping of a cascading rebase and nothing more. Every non-trivial git command it runs is echoed with its output, so you always see what it did and can drop back to plain git at any point. Because it rewrites history, it's meant for stacks you own and force-push, not shared branches.
+By design git-tree is a **light wrapper around plain git**: it automates the bookkeeping of a cascading rebase and nothing more. Every non-trivial git command it runs is echoed with its output, so you always see what it did and can drop back to plain git at any point. Because it rewrites history, it's meant for stacks you own and force-push, not shared branches.
 
 ## Install
 
@@ -56,10 +56,10 @@ git tree --version                     # print git-tree <version>
 
 Interactive commands also take flags so they can run unattended:
 
-- `git tree split --after <commit> --name <branch> [--worktree <path> | --no-worktree]` — split with no prompts (omit any flag to be prompted for just that piece).
+- `git tree split --after <commit> --name <branch> [--worktree <path> | --no-worktree]`: split with no prompts (omit any flag to be prompted for just that piece).
 - `git tree split --child` inverts the split: the current branch (and its worktree) keeps the commits *up to* the split and stays the parent, while the new branch takes the *later* commits as a child; existing children follow the new branch. Default split does the reverse (the new branch is the parent, holding the earlier commits).
 - `propagate`, `rebase`, `push`, `remove`, `repair`, `detach` accept `-y`/`--yes` to skip the confirmation prompt. (`--dry-run` on `propagate`/`rebase`/`push`/`remove` previews without executing.)
-- `git tree repair [branch] [--force]` — recreates a worktree whose submodule state is corrupted (broken `.git` pointer, missing modules dir). Refuses if the worktree has uncommitted changes unless `--force` is passed.
+- `git tree repair [branch] [--force]`: recreates a worktree whose submodule state is corrupted (broken `.git` pointer, missing modules dir). Refuses if the worktree has uncommitted changes unless `--force` is passed.
 
 ## Reshaping the tree
 
@@ -103,7 +103,7 @@ git tree rebase main            (on bf16-mixed-precision, after fsdp2-sharding m
 
 ## How it works
 
-The tree lives entirely in git config — no external files, no commit labels, no hooks. Each
+The tree lives entirely in git config: no external files, no commit labels, no hooks. Each
 branch records its edge and fork point, and the tree's single remote lives on the root:
 
 ```
@@ -140,7 +140,7 @@ All branches in the tree must have linked worktrees. Operations that touch multi
 
 ## Submodules
 
-`git tree branch` automatically runs `git submodule update --init --recursive` after creating the worktree (skip with `--no-submodule-init`). `propagate` and `rebase` check submodule health before starting — if a worktree's submodule `.git` state is corrupted, they abort with a message pointing to `git tree repair`.
+`git tree branch` automatically runs `git submodule update --init --recursive` after creating the worktree (skip with `--no-submodule-init`). `propagate` and `rebase` check submodule health before starting: if a worktree's submodule `.git` state is corrupted, they abort with a message pointing to `git tree repair`.
 
 ## Development
 
@@ -157,19 +157,19 @@ uv run ty check git_tree/
 
 git-tree is built to be driven by an AI agent (or any script) as well as by hand. Pass `--json` in any position (`git tree --json <cmd>` or `git tree <cmd> --json`) to enter **agent mode**, which:
 
-- implies `--no-input` (never prompts — a prompt would deadlock an agent that isn't feeding stdin);
+- implies `--no-input` (never prompts: a prompt would deadlock an agent that isn't feeding stdin);
 - prints **exactly one JSON object** on stdout; every diagnostic (the `+ git …` echoes, git's own output, warnings) goes to stderr;
 - disables color.
 
 ### Envelope
 
-The object is **flat** — no nesting. A success carries just `command` and `ok`:
+The object is **flat** (no nesting). A success carries just `command` and `ok`:
 
 ```json
 {"command": "propagate", "ok": true}
 ```
 
-**Success is bare — re-query for state.** A mutation returns just `{ok: true}`; re-run `git tree --json` (the forest) for authoritative post-op state. The forest already carries it, so the envelope stays lean.
+**Success is bare; re-query for state.** A mutation returns just `{ok: true}`; re-run `git tree --json` (the forest) for authoritative post-op state. The forest already carries it, so the envelope stays lean.
 
 An error sets `ok: false` and adds an `error` object; it may also carry `branches` (the ones already processed) and a `remedy` (an argv array you can run):
 
@@ -194,7 +194,7 @@ A conflict is `error.kind == "conflict"` plus the location and the resume comman
 }
 ```
 
-A confirmation you must supply comes back as `confirmation_required` — re-run your command with `-y`:
+A confirmation you must supply comes back as `confirmation_required`; re-run your command with `-y`:
 
 ```json
 {
@@ -209,12 +209,12 @@ A confirmation you must supply comes back as `confirmation_required` — re-run 
 
 ### `error.kind`
 
-Derived from the exit code — `usage` (2), `conflict` (3), `precondition` (4), `not_a_tree_branch` (5), `error` (1) — with three specific overrides:
+Derived from the exit code: `usage` (2), `conflict` (3), `precondition` (4), `not_a_tree_branch` (5), `error` (1). Three specific overrides:
 
-- `input_required` — a required value or flag is missing.
-- `confirmation_required` — needs `-y`; re-run the command with it.
-- `lease_rejected` — a `--force-with-lease` push was rejected because the remote moved.
-- `unresolved_conflicts` — `git tree continue` was run with conflicts still unresolved.
+- `input_required`: a required value or flag is missing.
+- `confirmation_required`: needs `-y`; re-run the command with it.
+- `lease_rejected`: a `--force-with-lease` push was rejected because the remote moved.
+- `unresolved_conflicts`: `git tree continue` was run with conflicts still unresolved.
 
 ### Forward-compat contract
 
@@ -222,11 +222,11 @@ Agents **must ignore unknown fields and default-arm unknown enum values**, so ad
 
 ### `-y`/`--yes`
 
-`-y`/`--yes` skips the confirmation prompt on `propagate`/`rebase`/`push`/`remove`/`repair`/`detach` — the first-class way to run destructive ops unattended (no more `echo y | git tree …`). `--json` does **not** auto-imply it: it won't silently confirm a destructive op. Instead a needed confirmation returns `confirmation_required` (re-run with `-y`).
+`-y`/`--yes` skips the confirmation prompt on `propagate`/`rebase`/`push`/`remove`/`repair`/`detach`, the first-class way to run destructive ops unattended (no more `echo y | git tree …`). `--json` does **not** auto-imply it: it won't silently confirm a destructive op. Instead a needed confirmation returns `confirmation_required` (re-run with `-y`).
 
 ### The forest query
 
-With no subcommand, `git tree --json` prints the whole forest (every branch's parent, children, root, remote, fork commit, worktree, and status) — always the full forest, regardless of the current branch. It stays **backward-compatible**: `command` is `"tree"` and, the envelope being flat, its `roots`/`cycles`/`orphans`/`branches` keys sit as siblings, so existing consumers are unchanged. Each branch now also carries a `rebase_in_progress` boolean.
+With no subcommand, `git tree --json` prints the whole forest (every branch's parent, children, root, remote, fork commit, worktree, and status): always the full forest, regardless of the current branch. It stays **backward-compatible**: `command` is `"tree"` and, the envelope being flat, its `roots`/`cycles`/`orphans`/`branches` keys sit as siblings, so existing consumers are unchanged. Each branch now also carries a `rebase_in_progress` boolean.
 
 ```json
 {
@@ -247,7 +247,7 @@ Worktree/status fields are `null` for a branch with no worktree; `parent`/`pendi
 
 ### Other agent surface
 
-- **`git tree push`** returns `{ok: true}` with a `skipped` list of branches it did **not** push — each `{branch, reason}`, where `reason` is `"stale"` (behind its parent — run `propagate` first) or `"ancestor_not_pushed"`. On any push failure it exits non-zero with `error.kind` `lease_rejected` (the remote moved) or a generic `error`, and `error.branches` naming the failures.
+- **`git tree push`** returns `{ok: true}` with a `skipped` list of branches it did **not** push, each `{branch, reason}`, where `reason` is `"stale"` (behind its parent, run `propagate` first) or `"ancestor_not_pushed"`. On any push failure it exits non-zero with `error.kind` `lease_rejected` (the remote moved) or a generic `error`, and `error.branches` naming the failures.
 
 - **`git tree continue`** resumes a cascade after you resolve a conflict: it finishes the in-progress rebase (editor disabled, so no `$EDITOR` hang), records the new fork point, and re-propagates from the tree root so every branch the cascade would have reached is covered.
 
