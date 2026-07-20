@@ -278,7 +278,7 @@ class TestManpage:
         out = capsys.readouterr().out
         assert "FOR AGENTS" in out
         assert "git tree --json" in out
-        assert "CLAUDE.md" in out
+        assert "AGENTS.md" in out
 
 
 class TestDryRun:

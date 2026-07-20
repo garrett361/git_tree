@@ -63,7 +63,8 @@ Interactive commands also take flags so they can run unattended:
 - `propagate`, `rebase`, `push`, `remove`, `repair`, `detach` accept `-y`/`--yes` to skip the confirmation prompt. (`--dry-run` on `propagate`/`rebase`/`push`/`remove` previews without executing.)
 - `git tree repair [branch] [--force]` — recreates a worktree whose submodule state is corrupted (broken `.git` pointer, missing modules dir). Refuses if the worktree has uncommitted changes unless `--force` is passed.
 
-## Agent mode (`--json`)
+<details>
+<summary><h2 style="display:inline">Agent mode (<code>--json</code>)</h2></summary>
 
 git-tree is built to be driven by an AI agent (or any script) as well as by hand. Pass `--json` in any position (`git tree --json <cmd>` or `git tree <cmd> --json`) to enter **agent mode**, which:
 
@@ -170,6 +171,8 @@ Worktree/status fields are `null` for a branch with no worktree; `parent`/`pendi
 - **`--dry-run`** on `propagate`/`rebase`/`push`/`remove` previews without mutating.
 
 - **Discovering the command surface**: `git tree -h` (or `git-tree --help`) lists every subcommand and flag; the help epilog has a `FOR AGENTS` section. `git tree --help` works too once the man page is installed (see Install). All three share one source, the argparse parser.
+
+</details>
 
 ## How it works
 
