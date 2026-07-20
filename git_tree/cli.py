@@ -1083,8 +1083,8 @@ def _prunable_worktree_path(branch: str) -> Path | None:
     """Path of a stale (prunable) worktree registration for `branch`, if any.
 
     Its directory was deleted (rm -rf'd) without `git worktree prune`, so `discover()`
-    drops it and the branch looks worktree-less. `cmd_repair` uses this to point the user
-    at recovery rather than a bare "nothing to repair"."""
+    drops it and the branch looks worktree-less. `cmd_rebuild` uses this to point the user
+    at recovery rather than a bare "nothing to rebuild"."""
     porcelain = git("worktree", "list", "--porcelain")
     for entry in porcelain.split("\n\n"):
         lines = entry.splitlines()
@@ -1098,28 +1098,28 @@ def _prunable_worktree_path(branch: str) -> Path | None:
     return None
 
 
-def cmd_repair(args: argparse.Namespace) -> None:
-    """Nuke and recreate a corrupted worktree, preserving branch ref and tree config."""
+def cmd_rebuild(args: argparse.Namespace) -> None:
+    """Rebuild a corrupted worktree from the branch tip, preserving branch ref and tree config."""
     graph = discover()
 
     target = getattr(args, "branch", None)
     if target is None:
-        _require_input(args, "branch to repair", "the branch argument")
+        _require_input(args, "branch to rebuild", "the branch argument")
         candidates = sorted(
             b for b in graph.parent_of if (info := graph.branches.get(b)) and info.worktree
         )
         if not candidates:
-            raise TreeError("No tree-branch worktrees available to repair.")
+            raise TreeError("No tree-branch worktrees available to rebuild.")
         target = _select_one(
             candidates,
-            prompt="Repair worktree> ",
+            prompt="Rebuild worktree> ",
             header="Select a tree-branch whose worktree to rebuild",
         )
 
     if target not in graph.parent_of:
         raise TreeError(
-            f"{target} is not a repairable tree-branch — it has no tree-parent "
-            f"(git tree repair won't touch a tree root).",
+            f"git tree rebuild only acts on tree-branches; {target} has no tree-parent "
+            f"(rebuild won't touch a tree root).",
             code=5,
         )
 
@@ -1129,14 +1129,14 @@ def cmd_repair(args: argparse.Namespace) -> None:
         if stale is not None:
             raise TreeError(
                 f"{target}'s worktree at {stale} is gone, but git still has a stale "
-                f"registration for it. `git tree repair` rebuilds a corrupted worktree in "
+                f"registration for it. `git tree rebuild` recreates a corrupted worktree in "
                 f"place; it can't resurrect a deleted directory.\n"
                 f"Recover with:\n"
                 f"  git worktree prune\n"
                 f"  git worktree add {stale} {target}",
                 code=4,
             )
-        raise TreeError(f"{target} has no worktree registered. Nothing to repair.", code=4)
+        raise TreeError(f"{target} has no worktree registered. Nothing to rebuild.", code=4)
 
     wt_path = info.worktree
 
@@ -1145,7 +1145,7 @@ def cmd_repair(args: argparse.Namespace) -> None:
         cwd = Path.cwd().resolve()
         if cwd == wt_path.resolve() or cwd.is_relative_to(wt_path.resolve()):
             raise TreeError(
-                f"Cannot repair {target}: your shell is inside its worktree ({wt_path}).\n"
+                f"Cannot rebuild {target}: your shell is inside its worktree ({wt_path}).\n"
                 f"cd to a different directory first.",
                 code=4,
             )
@@ -1158,7 +1158,7 @@ def cmd_repair(args: argparse.Namespace) -> None:
         if info.is_dirty and not force:
             raise TreeError(
                 f"{target} has uncommitted changes in {wt_path}.\n"
-                f"Pass --force to repair anyway (uncommitted work will be lost).",
+                f"Pass --force to rebuild anyway (uncommitted work will be lost).",
                 code=4,
             )
     except subprocess.CalledProcessError:
@@ -1170,7 +1170,7 @@ def cmd_repair(args: argparse.Namespace) -> None:
     steps = ["Remove corrupted worktree", "Recreate worktree"]
     if has_submodules:
         steps.append("Initialize submodules")
-    print(f"Repairing {target} at {wt_path}:")
+    print(f"Rebuilding {target} at {wt_path}:")
     for i, step in enumerate(steps, 1):
         print(f"  {i}. {step}")
     print()
@@ -1180,15 +1180,15 @@ def cmd_repair(args: argparse.Namespace) -> None:
     _force_remove_worktree(wt_path, target)
     if not git_echo_ok("worktree", "add", str(wt_path), target):
         raise TreeError(f"Failed to recreate worktree at {wt_path}.")
-    # Repair exists to make submodule state healthy, so a failed init is a failed repair — don't
+    # Rebuild exists to make submodule state healthy, so a failed init is a failed rebuild; don't
     # claim "is healthy" over it.
     if not _init_submodules(wt_path):
         raise TreeError(
             f"Recreated {target}'s worktree at {wt_path}, but submodule init failed (see output "
-            f"above). Fix the submodule issue, then re-run `git tree repair {target}`.",
+            f"above). Fix the submodule issue, then re-run `git tree rebuild {target}`.",
             code=4,
         )
-    print(f"\nRepaired {target} — worktree at {wt_path} is healthy.")
+    print(f"\nRebuilt {target}: worktree at {wt_path} is healthy.")
 
 
 # [empty-patch handling]
@@ -1407,7 +1407,7 @@ def _require_healthy_submodules(branches: list[str], graph: Graph) -> None:
     lines = ["These branches have corrupted submodule state:"]
     for b, sub_path in unhealthy:
         lines.append(f"  {b}  (submodule: {sub_path})")
-    lines.append("\nFix with: git tree repair <branch>")
+    lines.append("\nFix with: git tree rebuild <branch>")
     raise TreeError("\n".join(lines), code=4)
 
 
@@ -2077,7 +2077,7 @@ _git-tree() {
         'attach:Attach current branch to tree'
         'detach:Remove a branch from tree'
         'remove:Remove a subtree’s worktrees, keep the branch refs'
-        'repair:Nuke and recreate a corrupted worktree'
+        'rebuild:Rebuild a corrupted worktree from the branch tip'
         'split:Split current branch into parent + child'
         'push:Push current branch + descendants'
         'log:Show git log graph for all tree-branches'
@@ -2135,7 +2135,7 @@ _git-tree() {
                 '(-y --yes)'{-y,--yes}'[Skip the confirmation prompt]' \
                 ':branch:__git_heads'
             ;;
-        repair)
+        rebuild)
             _arguments \
                 '--force[Proceed even if worktree has uncommitted changes]' \
                 '(-y --yes)'{-y,--yes}'[Skip the confirmation prompt]' \
@@ -2161,7 +2161,7 @@ _git_tree() {
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
     subcmds="propagate rebase continue branch attach detach remove"
-    subcmds="$subcmds repair split push log completions manpage"
+    subcmds="$subcmds rebuild split push log completions manpage"
 
     if [[ $COMP_CWORD -eq 1 ]]; then
         COMPREPLY=($(compgen -W "$subcmds" -- "$cur"))
@@ -2217,7 +2217,7 @@ _git_tree() {
                 COMPREPLY=($(compgen -W "$branches" -- "$cur"))
             fi
             ;;
-        repair)
+        rebuild)
             if [[ "$cur" == -* ]]; then
                 COMPREPLY=($(compgen -W "--force -y --yes" -- "$cur"))
             else
@@ -2314,7 +2314,7 @@ FOR AGENTS:
                      The forest query keeps its roots/cycles/orphans/branches keys (each
                      branch also has rebase_in_progress). Mutations return a bare {ok:true}
                      — re-query the forest for post-op state.
-  -y, --yes          skip confirmation on propagate/rebase/push/remove/repair/detach;
+  -y, --yes          skip confirmation on propagate/rebase/push/remove/rebuild/detach;
                      under --json a needed confirm returns kind=confirmation_required
                      (re-run with -y; never auto-confirmed)
   git tree continue  resume a cascade after resolving a conflict: finish the rebase (editor
@@ -2456,16 +2456,16 @@ def main(argv: list[str] | None = None) -> None:  # explicit argv for tests
     remove_p.add_argument("--dry-run", action="store_true", help="Show what would be done")
     remove_p.add_argument("-y", "--yes", action="store_true", help="Skip the confirmation prompt")
 
-    repair_p = sub.add_parser(
-        "repair",
-        help="Nuke and recreate a corrupted worktree (preserves branch ref and tree config)",
+    rebuild_p = sub.add_parser(
+        "rebuild",
+        help="Rebuild a corrupted worktree from the branch tip (keeps branch ref and tree config)",
         parents=[common],
     )
-    repair_p.add_argument("branch", nargs="?", help="Branch to repair (default: pick via fzf)")
-    repair_p.add_argument(
+    rebuild_p.add_argument("branch", nargs="?", help="Branch to rebuild (default: pick via fzf)")
+    rebuild_p.add_argument(
         "--force", action="store_true", help="Proceed even if worktree has uncommitted changes"
     )
-    repair_p.add_argument("-y", "--yes", action="store_true", help="Skip the confirmation prompt")
+    rebuild_p.add_argument("-y", "--yes", action="store_true", help="Skip the confirmation prompt")
 
     split_p = sub.add_parser(
         "split", help="Split current branch into parent + child", parents=[common]
@@ -2525,7 +2525,7 @@ def main(argv: list[str] | None = None) -> None:  # explicit argv for tests
         "attach": cmd_attach,
         "detach": cmd_detach,
         "remove": cmd_remove,
-        "repair": cmd_repair,
+        "rebuild": cmd_rebuild,
         "split": cmd_split,
         "push": cmd_push,
         "log": cmd_log,
