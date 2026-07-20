@@ -1,25 +1,23 @@
 # git-tree
 
-Cascading rebase tool for branch dependency chains.
+Manage a tree of stacked branches, one worktree per branch. Propagate a change to every descendant, rebasing only what's needed, and reshape the tree as you go.
 
-When you work with stacked branches (A → B → C), adding commits to A means B and C need rebasing. `git-tree` tracks these dependencies and automates the cascade.
+git-tree models your branches as a tree: each branch stacks on a parent, and a parent can have any number of children. Each lives in its own git worktree, so the whole tree stays checked out at once. You can edit, build, and run code on several branches in parallel, with no stashing to switch between them. For example:
 
-## Goals
+```
+main
+├── fused-rmsnorm-kernel      ~/worktrees/fused-rmsnorm-kernel      [⇡3]
+│   ├── rmsnorm-triton-bench  ~/worktrees/rmsnorm-triton-bench
+│   └── rmsnorm-unit-tests    ~/worktrees/rmsnorm-unit-tests        [!1]
+└── fsdp2-sharding            ~/worktrees/fsdp2-sharding
+    └── bf16-mixed-precision  ~/worktrees/bf16-mixed-precision      [2 new]
+```
 
-git-tree manages branches that form a **dependency tree** — each branch stacks on one
-parent, and a parent may have many children (a plain stack is the linear case). Each branch
-lives in its own git worktree, so the whole tree stays checked out at once and you move
-between branches without stashing.
+Amend the kernel on `fused-rmsnorm-kernel` and `git tree propagate` rebases `rmsnorm-triton-bench` and `rmsnorm-unit-tests` onto the new tip, replaying only each branch's own commits so upstream work never re-conflicts. Land a fix on `main` (say a dataloader change every branch depends on) and it cascades through the entire tree in one command.
 
-Edit any branch with plain git (rebase, reorder, amend, add or drop commits, pull its
-parent) and git-tree propagates that edit to every descendant, replaying only each branch's
-own work so you never re-resolve a conflict you've already handled. It also provides the
-commands to build and reshape the tree: create child branches with worktrees, split a branch
-into parent and child, attach or detach branches, and tear down a subtree's worktrees.
+git-tree also grows and reshapes the tree: create a child branch, split one branch into two, attach or detach a subtree, or rehome a stack whose base merged upstream. See [Reshaping the tree](#reshaping-the-tree) for what each command does to the structure.
 
-It rewrites history, so it's for stacks you control and force-push, not shared branches. And
-it stays a thin wrapper — non-trivial git commands are echoed with their output, so you can
-see what it did and fall back to plain git.
+By design git-tree is a **light wrapper around plain git** — it automates the bookkeeping of a cascading rebase and nothing more. Every non-trivial git command it runs is echoed with its output, so you always see what it did and can drop back to plain git at any point. Because it rewrites history, it's meant for stacks you own and force-push, not shared branches.
 
 ## Install
 
@@ -63,6 +61,46 @@ Interactive commands also take flags so they can run unattended:
 - `propagate`, `rebase`, `push`, `remove`, `repair`, `detach` accept `-y`/`--yes` to skip the confirmation prompt. (`--dry-run` on `propagate`/`rebase`/`push`/`remove` previews without executing.)
 - `git tree repair [branch] [--force]` — recreates a worktree whose submodule state is corrupted (broken `.git` pointer, missing modules dir). Refuses if the worktree has uncommitted changes unless `--force` is passed.
 
+## Reshaping the tree
+
+The reshaping commands are small, local edits to the structure. Each below shows the tree before → after:
+
+```
+git tree branch ~/worktrees/rmsnorm-fp8 rmsnorm-fp8   (from fused-rmsnorm-kernel)
+
+  fused-rmsnorm-kernel          fused-rmsnorm-kernel
+  ├── rmsnorm-triton-bench      ├── rmsnorm-triton-bench
+  └── rmsnorm-unit-tests    →   ├── rmsnorm-unit-tests
+                                └── rmsnorm-fp8   ← new
+```
+
+```
+git tree split                                        (on fsdp2-sharding)
+
+  fsdp2-sharding                fsdp2-comm-hooks   ← new parent
+  └── bf16-mixed-precision  →   └── fsdp2-sharding
+                                    └── bf16-mixed-precision
+```
+
+```
+git tree detach && git tree attach fused-rmsnorm-kernel   (re-parent bf16-mixed-precision)
+
+  main                              main
+  ├── fused-rmsnorm-kernel          ├── fused-rmsnorm-kernel
+  └── fsdp2-sharding            →   │   └── bf16-mixed-precision
+      └── bf16-mixed-precision      └── fsdp2-sharding
+```
+
+```
+git tree rebase main            (on bf16-mixed-precision, after fsdp2-sharding merges)
+
+  main                               main
+  └── fsdp2-sharding   (merged)  →   ├── fsdp2-sharding
+      └── bf16-mixed-precision       └── bf16-mixed-precision
+```
+
+`git tree rebase` excludes the old parent's now-redundant commits and cascades the result to every descendant, so the whole subtree comes along.
+
 ## How it works
 
 The tree lives entirely in git config — no external files, no commit labels, no hooks. Each
@@ -90,9 +128,7 @@ After adding commits to a parent branch, run `git tree propagate` to rebase all 
 
 ### Rebase
 
-When a parent branch gets squash-merged upstream, `git tree rebase <target>` rebases the current branch onto the merge target, excluding the old parent's commits, then cascades to descendants.
-
-Equivalent to: `git rebase --onto <target> <fork-point>` + `git tree attach <target>` + `git tree propagate`.
+`git tree rebase <target>` (for when a parent is squash-merged upstream, see [Reshaping the tree](#reshaping-the-tree)) is equivalent to: `git rebase --onto <target> <fork-point>` + `git tree attach <target>` + `git tree propagate`.
 
 ### Push
 
@@ -213,15 +249,11 @@ Worktree/status fields are `null` for a branch with no worktree; `parent`/`pendi
 
 - **`git tree push`** returns `{ok: true}` with a `skipped` list of branches it did **not** push — each `{branch, reason}`, where `reason` is `"stale"` (behind its parent — run `propagate` first) or `"ancestor_not_pushed"`. On any push failure it exits non-zero with `error.kind` `lease_rejected` (the remote moved) or a generic `error`, and `error.branches` naming the failures.
 
-- **`git tree continue`** resumes a cascade after you resolve a conflict: it finishes the in-progress rebase (editor disabled, so no `$EDITOR` hang), records the new fork point, and re-propagates from the tree root so every branch the cascade would have reached is covered. It replaces the old `git rebase --continue` + `git tree propagate <parent>` two-step.
-
-- **`git tree --version`** prints `git-tree <version>`.
+- **`git tree continue`** resumes a cascade after you resolve a conflict: it finishes the in-progress rebase (editor disabled, so no `$EDITOR` hang), records the new fork point, and re-propagates from the tree root so every branch the cascade would have reached is covered.
 
 - **`--no-input`** (global, without `--json`) never prompts: if a value would be asked for interactively (a confirmation, a branch/parent selection, a name), it errors instead, naming the flag that supplies it. Compose with `--yes` to auto-confirm confirmations while still erroring on other missing input.
 
 - **Exit codes** let you branch on the failure class: `0` success, `2` usage error, `3` resumable conflict (resolve, then `git tree continue`), `4` precondition/dirty state, `5` not a tree-branch.
-
-- **`--dry-run`** on `propagate`/`rebase`/`push`/`remove` previews without mutating.
 
 - **Discovering the command surface**: `git tree -h` (or `git-tree --help`) lists every subcommand and flag; the help epilog has a `FOR AGENTS` section. `git tree --help` works too once the man page is installed (see Install). All three share one source, the argparse parser.
 
