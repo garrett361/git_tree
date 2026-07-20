@@ -63,6 +63,59 @@ Interactive commands also take flags so they can run unattended:
 - `propagate`, `rebase`, `push`, `remove`, `repair`, `detach` accept `-y`/`--yes` to skip the confirmation prompt. (`--dry-run` on `propagate`/`rebase`/`push`/`remove` previews without executing.)
 - `git tree repair [branch] [--force]` — recreates a worktree whose submodule state is corrupted (broken `.git` pointer, missing modules dir). Refuses if the worktree has uncommitted changes unless `--force` is passed.
 
+## How it works
+
+The tree lives entirely in git config — no external files, no commit labels, no hooks. Each
+branch records its edge and fork point, and the tree's single remote lives on the root:
+
+```
+git config branch.<name>.tree-parent-branch <parent-branch>   # which branch it stacks on
+git config branch.<name>.tree-fork-commit   <commit>          # where it forks from that parent
+git config branch.<root>.remote             <remote>          # the tree's one remote (on the root)
+```
+
+`tree-parent-branch` is the structural edge; `tree-fork-commit` is the parent's tip the
+branch was last rebased onto (set on `branch`/`attach`/`split` and updated after every
+successful rebase). The fork commit is what lets a rebase replay *only* the branch's own
+commits: once a parent moves ahead of its child, `merge-base(parent, child)` drifts off the
+real fork, so the stored commit is the only reliable boundary. This is what makes an
+interrupted propagate resumable, and keeps a reorder/split or `git pull --rebase` of a parent
+from corrupting its descendants.
+
+Works immediately after `git tree branch` or `git tree attach`, which record the fork commit.
+
+### Propagate
+
+After adding commits to a parent branch, run `git tree propagate` to rebase all descendants. Branches are processed in topological order (parents first), and each branch's result is printed as it completes. On conflict the cascade stops: the branches already rebased are shown, then git-tree exits (code 3) telling you where to resolve. Resolve the conflict and `git add` the files, then run `git tree continue` to finish the rebase, record the new fork point, and continue to the remaining descendants (it replaces the old `git rebase --continue` + `git tree propagate <parent>` two-step).
+
+### Rebase
+
+When a parent branch gets squash-merged upstream, `git tree rebase <target>` rebases the current branch onto the merge target, excluding the old parent's commits, then cascades to descendants.
+
+Equivalent to: `git rebase --onto <target> <fork-point>` + `git tree attach <target>` + `git tree propagate`.
+
+### Push
+
+`git tree push` pushes the current branch and all descendants with `--force-with-lease`. Branches that are stale (behind their parent) are skipped with a warning to run `propagate` first. It pushes with `-u`, so git also writes each pushed branch's own `branch.<b>.remote`/`.merge`; git-tree ignores those and always resolves the tree's remote from the root.
+
+## Worktrees
+
+All branches in the tree must have linked worktrees. Operations that touch multiple branches (propagate, rebase, push) verify this upfront and abort with an error listing any branches missing worktrees. Dirty worktrees are automatically stashed/popped during rebase.
+
+## Submodules
+
+`git tree branch` automatically runs `git submodule update --init --recursive` after creating the worktree (skip with `--no-submodule-init`). `propagate` and `rebase` check submodule health before starting — if a worktree's submodule `.git` state is corrupted, they abort with a message pointing to `git tree repair`.
+
+## Development
+
+```sh
+uv sync
+uv run pytest tests/ -q
+uv run ruff check . --fix
+uv run ruff format .
+uv run ty check git_tree/
+```
+
 <details>
 <summary><h2 style="display:inline">Agent mode (<code>--json</code>)</h2></summary>
 
@@ -173,56 +226,3 @@ Worktree/status fields are `null` for a branch with no worktree; `parent`/`pendi
 - **Discovering the command surface**: `git tree -h` (or `git-tree --help`) lists every subcommand and flag; the help epilog has a `FOR AGENTS` section. `git tree --help` works too once the man page is installed (see Install). All three share one source, the argparse parser.
 
 </details>
-
-## How it works
-
-The tree lives entirely in git config — no external files, no commit labels, no hooks. Each
-branch records its edge and fork point, and the tree's single remote lives on the root:
-
-```
-git config branch.<name>.tree-parent-branch <parent-branch>   # which branch it stacks on
-git config branch.<name>.tree-fork-commit   <commit>          # where it forks from that parent
-git config branch.<root>.remote             <remote>          # the tree's one remote (on the root)
-```
-
-`tree-parent-branch` is the structural edge; `tree-fork-commit` is the parent's tip the
-branch was last rebased onto (set on `branch`/`attach`/`split` and updated after every
-successful rebase). The fork commit is what lets a rebase replay *only* the branch's own
-commits: once a parent moves ahead of its child, `merge-base(parent, child)` drifts off the
-real fork, so the stored commit is the only reliable boundary. This is what makes an
-interrupted propagate resumable, and keeps a reorder/split or `git pull --rebase` of a parent
-from corrupting its descendants.
-
-Works immediately after `git tree branch` or `git tree attach`, which record the fork commit.
-
-### Propagate
-
-After adding commits to a parent branch, run `git tree propagate` to rebase all descendants. Branches are processed in topological order (parents first), and each branch's result is printed as it completes. On conflict the cascade stops: the branches already rebased are shown, then git-tree exits (code 3) telling you where to resolve. Resolve the conflict and `git add` the files, then run `git tree continue` to finish the rebase, record the new fork point, and continue to the remaining descendants (it replaces the old `git rebase --continue` + `git tree propagate <parent>` two-step).
-
-### Rebase
-
-When a parent branch gets squash-merged upstream, `git tree rebase <target>` rebases the current branch onto the merge target, excluding the old parent's commits, then cascades to descendants.
-
-Equivalent to: `git rebase --onto <target> <fork-point>` + `git tree attach <target>` + `git tree propagate`.
-
-### Push
-
-`git tree push` pushes the current branch and all descendants with `--force-with-lease`. Branches that are stale (behind their parent) are skipped with a warning to run `propagate` first. It pushes with `-u`, so git also writes each pushed branch's own `branch.<b>.remote`/`.merge`; git-tree ignores those and always resolves the tree's remote from the root.
-
-## Worktrees
-
-All branches in the tree must have linked worktrees. Operations that touch multiple branches (propagate, rebase, push) verify this upfront and abort with an error listing any branches missing worktrees. Dirty worktrees are automatically stashed/popped during rebase.
-
-## Submodules
-
-`git tree branch` automatically runs `git submodule update --init --recursive` after creating the worktree (skip with `--no-submodule-init`). `propagate` and `rebase` check submodule health before starting — if a worktree's submodule `.git` state is corrupted, they abort with a message pointing to `git tree repair`.
-
-## Development
-
-```sh
-uv sync
-uv run pytest tests/ -q
-uv run ruff check . --fix
-uv run ruff format .
-uv run ty check git_tree/
-```
