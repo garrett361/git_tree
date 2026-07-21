@@ -1,5 +1,7 @@
 # git-tree
 
+[![CI](https://github.com/garrett361/git_tree/actions/workflows/ci.yml/badge.svg)](https://github.com/garrett361/git_tree/actions/workflows/ci.yml)
+
 Manage a tree of stacked branches, one worktree per branch. Propagate a change to every descendant, rebasing only what's needed, and reshape the tree as you go.
 
 git-tree models your branches as a tree: each branch stacks on a parent, and a parent can have any number of children. Each lives in its own git worktree, so the whole tree stays checked out at once. You can edit, build, and run code on several branches in parallel, with no stashing to switch between them. For example:
