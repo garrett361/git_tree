@@ -45,6 +45,26 @@ uv run ruff format .             # format
 uv run ty check git_tree/        # type check
 ```
 
+Verify everything before committing (checking forms, no mutation — mirrors CI):
+
+```sh
+uv run ruff format --check . && uv run ruff check . && uv run ty check git_tree/ && uv run pytest tests/ -q
+```
+
+Fast inner loop: test files map 1:1 to commands (`test_rebase.py`, `test_push.py`, ...), so iterate on the matching file (seconds) and run the full suite (~2.5 min) before committing.
+
+## Adding a subcommand
+
+A command touches five sites; miss one and it half-works:
+
+1. The `cmd_<name>(args)` handler.
+2. `sub.add_parser(...)` in `_build_parser()` (the parser is the single source of truth for `-h` and the man page).
+3. The `commands` dispatch dict in `main()`.
+4. `_ZSH_COMPLETION`: the `subcmds` list and a `case` arm.
+5. `_BASH_COMPLETION`: the `subcmds` string and a `case` arm.
+
+The completion strings (4, 5) are hand-maintained, **not** parser-derived; a test walks `_build_parser()` and fails if either omits the new subcommand or one of its flags, so lean on it. Commands that emit non-envelope output (`manpage`, `completions`) or have no JSON form (`log`) are special-cased in `main()` ahead of the dispatch dict.
+
 ## Architecture
 
 Single module: `git_tree/cli.py`. All commands, git helpers, graph discovery, and tree display in one file. Entry point: `git_tree.cli:main` (registered as `git-tree` console script).
