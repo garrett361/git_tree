@@ -60,7 +60,9 @@ git tree continue                      # resume a cascade after a conflict (re-p
 git tree rebase <target>               # rebase current branch + descendants onto new base
 git tree split                         # split current branch into parent + child
 git tree push                          # push current branch + descendants (--force-with-lease)
+git tree log                           # show a git log graph across the whole tree
 git tree manpage [--install]           # emit the man page (roff); --install writes it to the man path
+git tree completions <zsh|bash>        # emit the shell completion script
 git tree --version                     # print git-tree <version>
 ```
 
@@ -251,7 +253,7 @@ A confirmation you must supply comes back as `confirmation_required`; re-run you
 
 ### `error.kind`
 
-Derived from the exit code: `usage` (2), `conflict` (3), `precondition` (4), `not_a_tree_branch` (5), `error` (1). Three specific overrides:
+Derived from the exit code: `usage` (2), `conflict` (3), `precondition` (4), `not_a_tree_branch` (5), `error` (1). Four specific overrides:
 
 - `input_required`: a required value or flag is missing.
 - `confirmation_required`: needs `-y`; re-run the command with it.

@@ -6,7 +6,7 @@ import os
 
 import pytest
 
-from git_tree.cli import cmd_propagate, main
+from git_tree.cli import _BASH_COMPLETION, _ZSH_COMPLETION, _build_parser, cmd_propagate, main
 
 from .conftest import RepoHelper
 
@@ -261,6 +261,38 @@ class TestManpage:
         assert "FOR AGENTS" in out
         assert "git tree --json" in out
         assert "AGENTS.md" in out
+
+
+class TestCompletionsInSync:
+    """The zsh/bash completion strings are hand-maintained twins of the argparse parser (not
+    derived from it), so they silently drift when a subcommand or flag is added. These tests
+    walk the parser and fail if either completion omits a subcommand or one of its flags."""
+
+    # Universal flags added to every subparser via the shared `common` parent; the completions
+    # intentionally don't list them per-command, so they're excluded from the per-command check.
+    _UNIVERSAL = {"-h", "--help", "--json", "--no-input"}
+
+    def _subparsers(self):
+        parser = _build_parser()
+        sub = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
+        return sub.choices
+
+    def test_every_subcommand_is_completable(self) -> None:
+        for name in self._subparsers():
+            assert name in _ZSH_COMPLETION, f"zsh completion missing subcommand: {name}"
+            assert name in _BASH_COMPLETION, f"bash completion missing subcommand: {name}"
+
+    def test_every_flag_is_completable(self) -> None:
+        for name, subparser in self._subparsers().items():
+            flags = {
+                opt
+                for action in subparser._actions
+                for opt in action.option_strings
+                if opt.startswith("--") and opt not in self._UNIVERSAL
+            }
+            for flag in flags:
+                assert flag in _ZSH_COMPLETION, f"zsh completion missing {name} flag: {flag}"
+                assert flag in _BASH_COMPLETION, f"bash completion missing {name} flag: {flag}"
 
 
 class TestDryRun:

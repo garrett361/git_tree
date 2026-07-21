@@ -2142,8 +2142,14 @@ _git-tree() {
                 '(-y --yes)'{-y,--yes}'[Skip the confirmation prompt]' \
                 ':target:__git_heads'
             ;;
+        continue)
+            _arguments '--no-auto-rerere[Disable auto-continue via rerere]'
+            ;;
         branch)
-            _arguments ':path:_directories' ':name:'
+            _arguments \
+                '--no-submodule-init[Skip git submodule update --init --recursive]' \
+                ':path:_directories' \
+                ':name:'
             ;;
         split)
             _arguments \
@@ -2220,8 +2226,15 @@ _git_tree() {
                 COMPREPLY=($(compgen -W "$branches" -- "$cur"))
             fi
             ;;
+        continue)
+            COMPREPLY=($(compgen -W "--no-auto-rerere" -- "$cur"))
+            ;;
         branch)
-            COMPREPLY=($(compgen -d -- "$cur"))
+            if [[ "$cur" == -* ]]; then
+                COMPREPLY=($(compgen -W "--no-submodule-init" -- "$cur"))
+            else
+                COMPREPLY=($(compgen -d -- "$cur"))
+            fi
             ;;
         split)
             if [[ "$cur" == -* ]]; then
@@ -2399,7 +2412,12 @@ def _render_error(args: argparse.Namespace, err: TreeError, out) -> NoReturn:
     raise SystemExit(err.code)
 
 
-def main(argv: list[str] | None = None) -> None:  # explicit argv for tests
+def _build_parser() -> argparse.ArgumentParser:
+    """Build the full argument parser. Sole source of truth for the command surface: `main`
+    dispatches on it, `_render_manpage` and `-h` render from it, and the completion-drift test
+    walks it. The hand-maintained completion strings are NOT derived from it, so any subcommand
+    or flag added here must also be added to `_ZSH_COMPLETION` and `_BASH_COMPLETION` (a test
+    enforces this)."""
     parser = argparse.ArgumentParser(
         prog="git-tree",
         description=__doc__,
@@ -2541,7 +2559,11 @@ def main(argv: list[str] | None = None) -> None:  # explicit argv for tests
     manpage_p.add_argument(
         "--dir", metavar="DIR", help="Directory to install into (default: ~/.local/share/man/man1)"
     )
+    return parser
 
+
+def main(argv: list[str] | None = None) -> None:  # explicit argv for tests
+    parser = _build_parser()
     args, unknown = parser.parse_known_args(argv)
     if unknown and getattr(args, "command", None) != "log":
         parser.error(f"unrecognized arguments: {' '.join(unknown)}")
