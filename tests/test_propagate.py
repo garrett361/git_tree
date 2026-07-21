@@ -5,7 +5,7 @@ import shutil
 
 import pytest
 
-from git_tree.cli import cmd_propagate, discover
+from git_tree.cli import TreeError, _has_active_rebase, cmd_continue, cmd_propagate, discover
 
 from .conftest import RepoHelper
 
@@ -475,3 +475,74 @@ class TestPropagatePrunableWorktree:
 
         graph = discover()  # must not raise FileNotFoundError
         assert graph.parent_of["b"] == "main"
+
+
+class TestContinueMultiWorktree:
+    def _stuck_tree(self, repo: RepoHelper, root: str, child: str, shared: str, monkeypatch):
+        """Build root -> child (child in its own worktree), then conflict + propagate so the
+        child's worktree is left mid-rebase. Returns the child's worktree path."""
+        repo.git("branch", root, "main")
+        repo.git("branch", child, root)
+        repo.set_parent(child, root)
+        wt = repo.worktree(child)
+        (wt / shared).write_text(f"{child} version")
+        repo.git("add", shared, cwd=wt)
+        repo.git("commit", "-m", f"{child} edits {shared}", cwd=wt)
+
+        repo.checkout(root)
+        repo.commit(shared, f"{root} version", f"{root} edits {shared}")
+        monkeypatch.setattr("builtins.input", lambda _: "y")
+        with pytest.raises(SystemExit):
+            cmd_propagate(_ns(branch=root))
+        return wt
+
+    def test_two_trees_mid_rebase_need_cwd_to_disambiguate(
+        self, repo: RepoHelper, monkeypatch, capsys
+    ) -> None:
+        wt_c1 = self._stuck_tree(repo, "r1", "c1", "s1.txt", monkeypatch)
+        wt_c2 = self._stuck_tree(repo, "r2", "c2", "s2.txt", monkeypatch)
+        assert _has_active_rebase(wt_c1) and _has_active_rebase(wt_c2)
+
+        # From a neutral cwd (inside neither stuck worktree) continue can't pick a tree.
+        with pytest.raises(TreeError) as exc:
+            cmd_continue(argparse.Namespace(no_auto_rerere=False))
+        assert exc.value.code == 4
+        assert "Multiple worktrees are mid-rebase" in capsys.readouterr().err
+        # Nothing was resumed: both still stuck.
+        assert _has_active_rebase(wt_c1) and _has_active_rebase(wt_c2)
+
+        # From inside c1's worktree, resolve + continue resumes exactly that tree.
+        (wt_c1 / "s1.txt").write_text("resolved")
+        repo.git("add", "s1.txt", cwd=wt_c1)
+        monkeypatch.chdir(wt_c1)
+        cmd_continue(argparse.Namespace(no_auto_rerere=False))
+
+        assert not _has_active_rebase(wt_c1)  # c1 finished
+        assert "r1 edits s1.txt" in repo.git("log", "--oneline", "c1")
+        assert _has_active_rebase(wt_c2)  # the other tree is untouched
+
+
+class TestStashPopConflict:
+    def test_stash_pop_conflict_is_nonfatal_and_reported(
+        self, repo: RepoHelper, monkeypatch, capsys, tmp_path
+    ) -> None:
+        """A dirty change that collides with the rebased tip: the rebase still moves the
+        branch ref, and the failed stash pop is reported (not fatal), leaving the worktree
+        for the user."""
+        repo.commit("x.txt", "orig", "base with x")
+        repo.branch("b", parent="main")
+        wt_b = repo.worktree("b", str(tmp_path / "wt-b"))
+        (wt_b / "x.txt").write_text("b dirty")  # uncommitted, collides on pop
+
+        repo.checkout("main")
+        repo.commit("x.txt", "main new", "main changes x")
+
+        monkeypatch.setattr("builtins.input", lambda _: "y")
+        cmd_propagate(_ns())  # must NOT raise: a pop conflict is non-fatal
+
+        out = capsys.readouterr().out
+        assert "stash pop conflict" in out
+        # The rebase itself succeeded: b's ref moved onto main's new tip.
+        assert repo.git("rev-parse", "b") == repo.git("rev-parse", "main")
+        # The failed pop left the collision in the worktree for the user to resolve.
+        assert "<<<<<<<" in (wt_b / "x.txt").read_text()

@@ -11,6 +11,7 @@ from git_tree.cli import (
     TreeError,
     _check_submodule_health,
     _force_remove_worktree,
+    _has_active_rebase,
     _submodule_paths,
     cmd_branch,
     cmd_propagate,
@@ -175,6 +176,41 @@ class TestPropagateSubmoduleHealth:
         err = capsys.readouterr().err
         assert "corrupted submodule state" in err
         assert "git tree rebuild" in err
+
+    def test_submodule_health_checked_before_clean_state(
+        self, repo: RepoHelper, tmp_path, capsys, monkeypatch
+    ) -> None:
+        """Ordering invariant: the submodule-health gate runs before the clean-state gate
+        (git status crashes on a corrupted submodule). A worktree that is BOTH mid-rebase
+        AND has a corrupted submodule must report the submodule problem, not the rebase."""
+        monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+        monkeypatch.setenv("GIT_CONFIG_KEY_0", "protocol.file.allow")
+        monkeypatch.setenv("GIT_CONFIG_VALUE_0", "always")
+
+        _add_submodule(repo, "mysub", tmp_path)
+        repo.branch("child", parent="main")
+        wt = repo.worktree("child", str(tmp_path / "wt-child"))
+        _git("submodule", "update", "--init", "--recursive", cwd=wt)
+
+        # Leave child's worktree mid-rebase (an unclean state the clean gate would flag).
+        (wt / "z.txt").write_text("child")
+        repo.git("add", "z.txt", cwd=wt)
+        repo.git("commit", "-m", "child z", cwd=wt)
+        repo.git("branch", "other", "main")
+        repo.checkout("other")
+        repo.commit("z.txt", "other", "other z")
+        repo.git("rebase", "other", cwd=wt, check=False)  # conflicts, leaves rebase in progress
+        assert _has_active_rebase(wt)
+
+        _corrupt_submodule(wt, "mysub")
+
+        with pytest.raises(TreeError):
+            cmd_propagate(
+                argparse.Namespace(dry_run=False, no_auto_rerere=False, branch="main", yes=True)
+            )
+        err = capsys.readouterr().err
+        assert "corrupted submodule state" in err  # health gate won
+        assert "rebase in progress" not in err  # clean gate never got to report
 
     def test_propagate_passes_with_uninitialized_submodules(
         self, repo: RepoHelper, tmp_path, monkeypatch

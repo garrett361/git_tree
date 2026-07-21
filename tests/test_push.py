@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import json
 
 import pytest
 
-from git_tree.cli import TreeError, cmd_push
+from git_tree.cli import TreeError, cmd_push, main
 
 from .conftest import RepoHelper
 
@@ -308,3 +309,39 @@ class TestPush:
         # The teammate commit must still be on origin (no clobber).
         remote_sha = repo.git("ls-remote", str(repo.origin), "refs/heads/feature").split()[0]
         assert remote_sha == teammate_sha
+
+    def test_lease_rejected_surfaces_in_json_envelope(
+        self, repo: RepoHelper, monkeypatch, capsys, tmp_path
+    ) -> None:
+        """The lease rejection reaches the --json error envelope as error.kind ==
+        'lease_rejected' (not just the raw TreeError), so an agent can branch on it."""
+        repo.branch("feature", parent="main")
+        wt = repo.worktree("feature", str(tmp_path / "wt-feature"))
+        (wt / "f1.txt").write_text("f1")
+        repo.git("add", "f1.txt", cwd=wt)
+        repo.git("commit", "-m", "first", cwd=wt)
+        repo.push("feature")
+
+        clone2 = tmp_path / "clone2"
+        repo.git("clone", str(repo.origin), str(clone2), cwd=tmp_path)
+        repo.git("config", "user.email", "t@t.com", cwd=clone2)
+        repo.git("config", "user.name", "t", cwd=clone2)
+        repo.git("checkout", "feature", cwd=clone2)
+        (clone2 / "team.txt").write_text("team")
+        repo.git("add", "team.txt", cwd=clone2)
+        repo.git("commit", "-m", "teammate commit", cwd=clone2)
+        repo.git("push", "origin", "feature", cwd=clone2)
+
+        (wt / "f2.txt").write_text("f2")
+        repo.git("add", "f2.txt", cwd=wt)
+        repo.git("commit", "-m", "local second", cwd=wt)
+
+        monkeypatch.chdir(wt)
+        with pytest.raises(SystemExit) as exc:
+            main(["push", "--json", "-y"])
+        assert exc.value.code == 1
+
+        env = json.loads(capsys.readouterr().out)
+        assert env["ok"] is False
+        assert env["error"]["kind"] == "lease_rejected"
+        assert "feature" in env["error"]["branches"]
