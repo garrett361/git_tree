@@ -1221,6 +1221,14 @@ def _skip_empty_commits(cwd: Path) -> str | None:
     return "ok (skipped empty)"
 
 
+def _rerere_args(auto_rerere: bool) -> list[str]:
+    """`-c rerere.enabled=...` so git-tree drives rerere by its own flag rather than the user's
+    global git config. Auto-replaying a resolution across the cascade needs rerere on: the run
+    where the user resolves the conflict records it, later branches with the same conflict reuse
+    it. `--no-auto-rerere` turns it off."""
+    return ["-c", f"rerere.enabled={'true' if auto_rerere else 'false'}"]
+
+
 def _rebase_onto(
     child: str,
     parent: str,
@@ -1231,7 +1239,10 @@ def _rebase_onto(
 ) -> str:
     """Attempt rebase of child onto parent in its worktree. Returns status or exits on conflict."""
     head_before = git("rev-parse", "HEAD", cwd=cwd)
-    result = git_echo("rebase", "--no-reapply-cherry-picks", "--onto", parent, fork_point, cwd=cwd)
+    rr = _rerere_args(auto_rerere)
+    result = git_echo(
+        *rr, "rebase", "--no-reapply-cherry-picks", "--onto", parent, fork_point, cwd=cwd
+    )
 
     if result.returncode == 0:
         return "ok"
@@ -1256,9 +1267,9 @@ def _rebase_onto(
         _conflict_exit(child, parent, cwd, stashed)
 
     while True:
-        git_echo("rerere", cwd=cwd)
+        git_echo(*rr, "rerere", cwd=cwd)
 
-        remaining = git("rerere", "remaining", cwd=cwd, check=False)
+        remaining = git(*rr, "rerere", "remaining", cwd=cwd, check=False)
         if remaining.strip():
             _conflict_exit(child, parent, cwd, stashed)
 
@@ -1267,7 +1278,7 @@ def _rebase_onto(
         if not git_echo_ok("add", "-u", cwd=cwd):
             _conflict_exit(child, parent, cwd, stashed)
 
-        continued = git_echo_ok("rebase", "--continue", cwd=cwd, env={"GIT_EDITOR": "true"})
+        continued = git_echo_ok(*rr, "rebase", "--continue", cwd=cwd, env={"GIT_EDITOR": "true"})
         if continued:
             return "ok (rerere)"
 
@@ -1677,7 +1688,8 @@ def cmd_continue(args: argparse.Namespace) -> None:
             branches=[branch],
         )
 
-    git_echo("rebase", "--continue", cwd=wt, env={"GIT_EDITOR": "true"})
+    auto_rerere = not getattr(args, "no_auto_rerere", False)
+    git_echo(*_rerere_args(auto_rerere), "rebase", "--continue", cwd=wt, env={"GIT_EDITOR": "true"})
     if _has_active_rebase(wt):
         # `--continue` stopped again: either a later commit conflicts, or it resolved to an
         # empty patch that must be skipped (mirrors the cascade's own handling). `stashed=False`:
@@ -1704,7 +1716,7 @@ def cmd_continue(args: argparse.Namespace) -> None:
     _require_worktrees(descendants, graph)
     _require_healthy_submodules(descendants, graph)
     _require_clean_state(descendants, graph)
-    _propagate_descendants(root, graph, auto_rerere=not getattr(args, "no_auto_rerere", False))
+    _propagate_descendants(root, graph, auto_rerere=auto_rerere)
 
 
 def _resolve_split_point(after: str, old_fork: str | None) -> str:
