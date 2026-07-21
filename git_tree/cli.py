@@ -794,11 +794,6 @@ def _tree_json(graph: Graph) -> dict:
             if b not in seen:
                 seen.add(b)
                 ordered.append(b)
-    # Safety net for any node reachable only via edges but not from a root.
-    for b in sorted(set(graph.parent_of) | set(graph.children_of)):
-        if b not in seen:
-            seen.add(b)
-            ordered.append(b)
     # Broken branches — an orphaned (missing) parent, or a cycle — have their edges dropped, so
     # the walks above miss the childless ones. Surface them too (an agent repairing a tree needs
     # their worktree + status), tagged below so they aren't mistaken for healthy roots.
@@ -960,27 +955,15 @@ def cmd_detach(args: argparse.Namespace) -> None:
     if not parent:
         raise TreeError(f"{branch} is not in the tree.", code=5)
 
-    # detach is the recovery path for a hand-edited cyclic config, so it must work even
-    # when discover() refuses to build a graph. Fall back to a config-only child lookup
-    # and skip the subtree preview (which can't safely render a cyclic graph).
-    try:
-        graph: Graph | None = discover()
-    except TreeError:
-        graph = None
-
-    if graph is not None:
-        children = graph.children_of.get(branch, [])
-    else:
-        children = [b for b in all_branch_names() if _get_tree_parent(b) == branch]
+    # detach is the recovery path for hand-edited cyclic config; discover() prunes cycles and
+    # returns a usable graph, so the normal child lookup and subtree preview work here too.
+    graph = discover()
+    children = graph.children_of.get(branch, [])
 
     print(f"Detaching {branch} from {parent}.")
     if children:
         print(f"{branch} has children — they will form a separate tree:")
-        if graph is not None:
-            print(format_tree(graph, root=branch))
-        else:
-            for child in children:
-                print(f"  {child}")
+        print(format_tree(graph, root=branch))
 
     if not _proceed(args, "Proceed?"):
         return
@@ -989,10 +972,7 @@ def cmd_detach(args: argparse.Namespace) -> None:
     print(f"Detached {branch} (was child of {parent})")
 
     if children:
-        try:
-            graph = discover()
-        except TreeError:
-            return
+        graph = discover()
         other_roots = [r for r in roots(graph) if r != branch]
         if other_roots:
             print("\nRemaining tree(s):")
