@@ -75,7 +75,8 @@ Single module: `git_tree/cli.py`. All commands, git helpers, graph discovery, an
   the `--onto <old-base>` exclude boundary, set on branch/attach/split and updated after each
   successful rebase. Required for correct propagate once a parent moves ahead of its child
   (`merge-base` drifts). `_get_fork_commit`/`_set_fork_commit` manage it; a missing key falls
-  back to `merge-base`.
+  back to `merge-base`. This boundary is what makes `git tree rebase <target>` equivalent to
+  `git rebase --onto <target> <fork-commit>` + `git tree attach <target>` + `git tree propagate`.
 
 **Key abstractions**:
 - `Graph` dataclass: `parent_of`, `children_of`, `branches` dicts + `downstream_from()` BFS. Also carries `worktree_of` (path per branch, roots included — roots have no `BranchInfo`), and `cycles`/`orphans` diagnostics surfaced by discovery.

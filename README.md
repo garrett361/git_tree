@@ -76,12 +76,7 @@ git tree --version                     # print git-tree <version>
 >
 > `propagate`/`rebase`/`push`/`remove` support `--dry-run` to preview first.
 
-Interactive commands also take flags so they can run unattended:
-
-- `git tree split --after <commit> --name <branch> [--worktree <path> | --no-worktree]`: split with no prompts (omit any flag to be prompted for just that piece).
-- `git tree split --child` inverts the split: the current branch (and its worktree) keeps the commits *up to* the split and stays the parent, while the new branch takes the *later* commits as a child; existing children follow the new branch. Default split does the reverse (the new branch is the parent, holding the earlier commits).
-- `propagate`, `rebase`, `push`, `remove`, `rebuild`, `detach` accept `-y`/`--yes` to skip the confirmation prompt. (`--dry-run` on `propagate`/`rebase`/`push`/`remove` previews without executing.)
-- `git tree rebuild [branch] [--force]`: rebuilds a worktree whose submodule state is corrupted (broken `.git` pointer, missing modules dir). Refuses if the worktree has uncommitted changes unless `--force` is passed.
+Interactive commands (`split`, and the confirmation-gated `propagate`/`rebase`/`push`/`remove`/`rebuild`/`detach`) take flags to run without prompting: `-y`/`--yes` skips a confirmation, and `--dry-run` previews `propagate`/`rebase`/`push`/`remove` first. See `git tree <cmd> -h` for each command's flags.
 
 ## Examples
 
@@ -165,19 +160,7 @@ real fork, so the stored commit is the only reliable boundary. This is what make
 interrupted propagate resumable, and keeps a reorder/split or `git pull --rebase` of a parent
 from corrupting its descendants.
 
-Works immediately after `git tree branch` or `git tree attach`, which record the fork commit.
-
-### Propagate
-
-After adding commits to a parent branch, run `git tree propagate` to rebase all descendants. Branches are processed in topological order (parents first), and each branch's result is printed as it completes. On conflict the cascade stops: the branches already rebased are shown, then git-tree exits (code 3) telling you where to resolve. Resolve the conflict and `git add` the files, then run `git tree continue` to finish the rebase, record the new fork point, and continue to the remaining descendants (it replaces the old `git rebase --continue` + `git tree propagate <parent>` two-step). A resolution you make is auto-replayed on later branches that hit the same conflict (git rerere); disable with `--no-auto-rerere`.
-
-### Rebase
-
-`git tree rebase <target>` (for when a parent is squash-merged upstream, see [Examples](#examples)) is equivalent to: `git rebase --onto <target> <fork-point>` + `git tree attach <target>` + `git tree propagate`.
-
-### Push
-
-Every branch in a tree pushes to one shared remote: the one on the tree's root (`branch.<root>.remote`, typically `origin`). `git tree push` sends the current branch and all its descendants there with `--force-with-lease`, skipping any branch that's stale (behind its parent, run `propagate` first) along with that branch's descendants, whose base isn't on the remote yet. It passes `-u`, so git records a per-branch upstream as a side effect, but git-tree ignores those and always resolves the remote from the root.
+For details of what each subcommand does under the hood, see [AGENTS.md](AGENTS.md).
 
 ## Worktrees
 
