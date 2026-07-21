@@ -119,12 +119,17 @@ git tree detach && git tree attach fused-rmsnorm-kernel
 ```
 
 ```
-# fsdp2-sharding was squash-merged into main; re-home bf16-mixed-precision onto main.
-git tree rebase main
+# fsdp2-sharding is a feature branch of several commits with a stack on top. You PR it and
+# it gets squash-merged into main. To re-home the stack onto the merged base:
+#   1. git pull                         (in main's worktree: pick up the squash commit)
+#   2. git tree rebase main             (from bf16-mixed-precision: re-parent onto main,
+#                                        drop fsdp2-sharding's merged commits, propagate to bf16-eval)
+#   3. git tree remove fsdp2-sharding   (tear down the merged, now-childless parent)
 
   main                                main
-  └── fsdp2-sharding   (merged)   →   ├── fsdp2-sharding
-      └── * bf16-mixed-precision      └── * bf16-mixed-precision
+  └── fsdp2-sharding  (merged)        ├── fsdp2-sharding          (merged; remove it)
+      └── * bf16-mixed-precision  →   └── * bf16-mixed-precision  (re-homed onto main)
+          └── bf16-eval                   └── bf16-eval           (propagated)
 ```
 
 `git tree rebase` excludes the old parent's now-redundant commits and cascades the result to
