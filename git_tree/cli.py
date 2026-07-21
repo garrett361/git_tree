@@ -816,12 +816,12 @@ def _tree_json(graph: Graph) -> dict:
         parent = graph.parent_of.get(name)
         worktree = graph.worktree_of.get(name)
         info = graph.branches.get(name)
-        _, remote = _root_remote(graph, name)
+        root, remote = _root_remote(graph, name)
         entry: dict = {
             "name": name,
             "parent": parent,
             "children": graph.children_of.get(name, []),
-            "root": root_of(graph, name),
+            "root": root,
             "remote": remote,
             "fork_commit": info.fork_commit if info else None,
             "worktree": str(worktree) if worktree else None,
@@ -1143,7 +1143,8 @@ def cmd_rebuild(args: argparse.Namespace) -> None:
     # Refuse if cwd is inside the target worktree
     try:
         cwd = Path.cwd().resolve()
-        if cwd == wt_path.resolve() or cwd.is_relative_to(wt_path.resolve()):
+        wt = wt_path.resolve()
+        if cwd.is_relative_to(wt):
             raise TreeError(
                 f"Cannot rebuild {target}: your shell is inside its worktree ({wt_path}).\n"
                 f"cd to a different directory first.",
@@ -1214,7 +1215,7 @@ def _skip_empty_commits(cwd: Path) -> str | None:
     leave the rebase resumable rather than discarding it.
     """
     while _has_active_rebase(cwd):
-        if git("ls-files", "--unmerged", cwd=cwd, check=False).strip():
+        if _has_unmerged(cwd):
             return None  # real conflict; leave rebase in progress
         if not git_echo_ok("rebase", "--skip", cwd=cwd):
             return None  # --skip surfaced a conflict / can't proceed; hand to user
@@ -1267,8 +1268,7 @@ def _rebase_onto(
         # git_echo already reprinted git's stderr above.
         raise TreeError(f"rebase of {child} onto {parent} failed (see output above)")
 
-    unmerged = git("ls-files", "--unmerged", cwd=cwd, check=False)
-    if not unmerged.strip():
+    if not _has_unmerged(cwd):
         status = _skip_empty_commits(cwd)
         if status is not None:
             return status
@@ -1294,8 +1294,7 @@ def _rebase_onto(
             return "ok (rerere)"
 
         # --continue stopped again — new conflict or empty patch?
-        new_unmerged = git("ls-files", "--unmerged", cwd=cwd, check=False)
-        if not new_unmerged.strip():
+        if not _has_unmerged(cwd):
             status = _skip_empty_commits(cwd)
             if status is not None:
                 return "ok (rerere)"
@@ -1338,6 +1337,11 @@ def _has_active_rebase(cwd: Path) -> bool:
     return (git_dir_path / "rebase-merge").is_dir() or (git_dir_path / "rebase-apply").is_dir()
 
 
+def _has_unmerged(cwd: Path) -> bool:
+    """True if the worktree has unmerged (conflicted) index entries."""
+    return bool(git("ls-files", "--unmerged", cwd=cwd, check=False).strip())
+
+
 def _stash_push_if_created(cwd: Path) -> bool:
     """Stash tracked changes; return True iff a new stash entry was created.
 
@@ -1367,6 +1371,18 @@ def _require_clean_state(branches: list[str], graph: Graph) -> None:
     for b, wt, reason in problems:
         lines.append(f"  {b}  ({reason} — resolve in: {wt})")
     raise TreeError("\n".join(lines), code=4, branches=[b for b, _, _ in problems])
+
+
+def _require_ready(branches: list[str], graph: Graph) -> None:
+    """Preflight gate for a cascade: worktrees present, submodules healthy, worktrees clean.
+
+    Order matters: worktree and submodule-health checks run before `_require_clean_state`,
+    because `git status` crashes on a corrupted submodule. Each underlying check is a no-op
+    on an empty list.
+    """
+    _require_worktrees(branches, graph)
+    _require_healthy_submodules(branches, graph)
+    _require_clean_state(branches, graph)
 
 
 # ---------------------------------------------------------------------------
@@ -1539,9 +1555,7 @@ def cmd_propagate(args: argparse.Namespace) -> None:
         print("No descendants to propagate to.")
         return
 
-    _require_worktrees(descendants, graph)
-    _require_healthy_submodules(descendants, graph)
-    _require_clean_state(descendants, graph)
+    _require_ready(descendants, graph)
 
     print(f"Propagating from {branch}:")
     for line in _subtree_lines(graph, branch, show_counts=True):
@@ -1595,9 +1609,7 @@ def cmd_rebase(args: argparse.Namespace) -> None:
     _require_healthy_submodules([branch], graph)
     _require_clean_state([branch], graph)
     if descendants:
-        _require_worktrees(descendants, graph)
-        _require_healthy_submodules(descendants, graph)
-        _require_clean_state(descendants, graph)
+        _require_ready(descendants, graph)
 
     print(f"Rebasing onto {target}:")
     print(f"  {branch}  [{commit_count} commits]  (old parent: {old_parent})")
@@ -1690,7 +1702,7 @@ def cmd_continue(args: argparse.Namespace) -> None:
             code=4,
         )
 
-    if git("ls-files", "--unmerged", cwd=wt, check=False).strip():
+    if _has_unmerged(wt):
         raise TreeError(
             f"{branch} still has unresolved conflicts in {wt}. Resolve them and `git add` the "
             f"files, then run `git tree continue`.",
@@ -1706,7 +1718,7 @@ def cmd_continue(args: argparse.Namespace) -> None:
         # empty patch that must be skipped (mirrors the cascade's own handling). `stashed=False`:
         # a stash from the original run isn't detectable here, and its first conflict already
         # told the user about it.
-        if git("ls-files", "--unmerged", cwd=wt, check=False).strip():
+        if _has_unmerged(wt):
             _conflict_exit(branch, onto, wt, stashed=False)
         if _skip_empty_commits(wt) is None:
             _conflict_exit(branch, onto, wt, stashed=False)
@@ -1722,11 +1734,8 @@ def cmd_continue(args: argparse.Namespace) -> None:
     root = root_of(graph, branch)
     descendants = graph.downstream_from(root)
     # Same preflight as cmd_propagate: the resume now reaches branches outside the original
-    # cascade's scope, so guard them the same way (worktrees before submodule/clean checks, since
-    # `git status` crashes on a corrupted submodule) rather than asserting deep in _rebase_branch.
-    _require_worktrees(descendants, graph)
-    _require_healthy_submodules(descendants, graph)
-    _require_clean_state(descendants, graph)
+    # cascade's scope, so guard them the same way rather than asserting deep in _rebase_branch.
+    _require_ready(descendants, graph)
     _propagate_descendants(root, graph, auto_rerere=auto_rerere)
 
 
@@ -1758,6 +1767,26 @@ def _worktree_choice(args: argparse.Namespace, name: str) -> str:
     _require_input(args, "worktree choice", "--worktree PATH or --no-worktree")
     reply = _prompt(f"Create worktree for {name}? [path / N]: ") or ""
     return "" if reply.lower() == "n" else reply
+
+
+def _add_split_worktree(worktree_path: str, name: str) -> None:
+    """Create `name`'s worktree at `worktree_path`, warning (not failing) if it can't be made.
+
+    The split's branch and config writes are already applied by the time this runs, so a
+    worktree-add failure must not abort and leave the user unsure whether the split happened.
+    No-op when `worktree_path` is empty (the user declined a worktree).
+    """
+    if not worktree_path:
+        return
+    if git_echo_ok("worktree", "add", worktree_path, name):
+        print(f"Created worktree at {worktree_path}")
+    else:
+        print(
+            f"Warning: could not create worktree at {worktree_path} "
+            f"(the split itself succeeded; add one later with "
+            f"`git worktree add <path> {name}`).",
+            file=sys.stderr,
+        )
 
 
 def _split_child(
@@ -1814,16 +1843,7 @@ def _split_child(
         git("config", f"branch.{c}.tree-parent-branch", new_name)
 
     worktree_path = _worktree_choice(args, new_name)
-    if worktree_path:
-        if git_echo_ok("worktree", "add", worktree_path, new_name):
-            print(f"Created worktree at {worktree_path}")
-        else:
-            print(
-                f"Warning: could not create worktree at {worktree_path} "
-                f"(the split itself succeeded; add one later with "
-                f"`git worktree add <path> {new_name}`).",
-                file=sys.stderr,
-            )
+    _add_split_worktree(worktree_path, new_name)
 
     kept_range = f"{old_fork}..{commit_hash}" if old_fork is not None else commit_hash
     kept = git_lines("log", "--oneline", kept_range)
@@ -1897,18 +1917,7 @@ def cmd_split(args: argparse.Namespace) -> None:
         # fork — it is now the new root's child, recorded above.
         _carry_remote_to_root(branch, parent_name)
 
-    if worktree_path:
-        # The split (branch + config) is already applied; a worktree-add failure
-        # must not abort and leave the user unsure whether the split happened.
-        if git_echo_ok("worktree", "add", worktree_path, parent_name):
-            print(f"Created worktree at {worktree_path}")
-        else:
-            print(
-                f"Warning: could not create worktree at {worktree_path} "
-                f"(the split itself succeeded; add one later with "
-                f"`git worktree add <path> {parent_name}`).",
-                file=sys.stderr,
-            )
+    _add_split_worktree(worktree_path, parent_name)
 
     split_range = f"{old_fork}..{commit_hash}" if old_fork is not None else commit_hash
     split_commits = git_lines("log", "--oneline", split_range)
