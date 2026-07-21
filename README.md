@@ -174,7 +174,7 @@ After adding commits to a parent branch, run `git tree propagate` to rebase all 
 
 ### Push
 
-`git tree push` pushes the current branch and all descendants with `--force-with-lease`. Branches that are stale (behind their parent) are skipped with a warning to run `propagate` first. It pushes with `-u`, so git also writes each pushed branch's own `branch.<b>.remote`/`.merge`; git-tree ignores those and always resolves the tree's remote from the root.
+Every branch in a tree pushes to one shared remote: the one on the tree's root (`branch.<root>.remote`, typically `origin`). `git tree push` sends the current branch and all its descendants there with `--force-with-lease`, skipping any branch that's stale (behind its parent, run `propagate` first) along with that branch's descendants, whose base isn't on the remote yet. It passes `-u`, so git records a per-branch upstream as a side effect, but git-tree ignores those and always resolves the remote from the root.
 
 ## Worktrees
 
