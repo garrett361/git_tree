@@ -66,7 +66,8 @@ git tree completions <zsh|bash>        # emit the shell completion script
 git tree --version                     # print git-tree <version>
 ```
 
-> **These commands touch more than the current branch:**
+> [!WARNING]
+> These commands touch more than the current branch:
 >
 > - **`propagate`, `rebase`, `push`**: the current branch and all its descendants (rebase or force-push the whole subtree).
 > - **`continue`**: re-propagates from the tree root, i.e. the entire tree.
