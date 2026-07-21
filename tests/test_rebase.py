@@ -4,7 +4,15 @@ import argparse
 
 import pytest
 
-from git_tree.cli import TreeError, _root_remote, cmd_push, cmd_rebase, discover
+from git_tree.cli import (
+    TreeError,
+    _has_active_rebase,
+    _root_remote,
+    cmd_continue,
+    cmd_push,
+    cmd_rebase,
+    discover,
+)
 
 from .conftest import RepoHelper
 
@@ -332,3 +340,49 @@ class TestRebase:
 
         assert repo.git("config", "branch.other.remote") == "upstream"
         assert _root_remote(discover(), "feature") == ("other", "upstream")
+
+
+class TestContinueAfterRebaseScope:
+    def test_continue_after_rebase_leaves_cousin_untouched(
+        self, repo: RepoHelper, monkeypatch, tmp_path
+    ) -> None:
+        """Rebasing B onto T and resuming the conflict with `continue B` must stay within B's
+        subtree — a drifted cousin C (another child of T) is not this cascade's concern and
+        must not be rebased."""
+        repo.commit("shared.txt", "original", "base shared")
+        repo.git("branch", "R", "main")
+        repo.git("branch", "T", "R")
+        repo.set_parent("T", "R")
+        wt_T = repo.worktree("T", str(tmp_path / "wt-T"))
+
+        repo.git("branch", "C", "T")  # cousin, forked before T advances
+        repo.set_parent("C", "T")
+        wt_C = repo.worktree("C", str(tmp_path / "wt-C"))
+        (wt_C / "c-only.txt").write_text("c")
+        repo.git("add", "c-only.txt", cwd=wt_C)
+        repo.git("commit", "-m", "C adds c-only", cwd=wt_C)
+
+        (wt_T / "shared.txt").write_text("T version")  # advance T -> C drifts
+        repo.git("add", "shared.txt", cwd=wt_T)
+        repo.git("commit", "-m", "T edits shared", cwd=wt_T)
+
+        repo.git("branch", "B", "R")
+        repo.set_parent("B", "R")
+        wt_B = repo.worktree("B", str(tmp_path / "wt-B"))
+        (wt_B / "shared.txt").write_text("B version")
+        repo.git("add", "shared.txt", cwd=wt_B)
+        repo.git("commit", "-m", "B edits shared", cwd=wt_B)
+
+        c_before = repo.git("rev-parse", "C")
+
+        monkeypatch.chdir(wt_B)
+        with pytest.raises(SystemExit):
+            cmd_rebase(_ns(target="T", yes=True))
+        assert _has_active_rebase(wt_B)
+
+        (wt_B / "shared.txt").write_text("resolved")
+        repo.git("add", "shared.txt", cwd=wt_B)
+        cmd_continue(argparse.Namespace(no_auto_rerere=False, origin="B"))
+
+        assert not _has_active_rebase(wt_B)
+        assert repo.git("rev-parse", "C") == c_before  # cousin untouched

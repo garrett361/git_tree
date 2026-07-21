@@ -91,7 +91,7 @@ class TestErrorEnvelope:
         assert err["branch"] == "b"
         assert err["conflicted_files"] == ["shared.txt"]
         assert err["worktree"]
-        assert err["remedy"] == ["git", "tree", "continue"]
+        assert err["remedy"] == ["git", "tree", "continue", "main"]
 
 
 class TestContinue:
@@ -114,7 +114,7 @@ class TestContinue:
         wt_b = self._stop_on_conflict(repo, capsys, tmp_path)
         (wt_b / "shared.txt").write_text("resolved")
         repo.git("add", "shared.txt", cwd=wt_b)
-        main(["continue", "--json"])
+        main(["continue", "main", "--json"])  # cascade began at main
         obj = json.loads(capsys.readouterr().out)
         assert obj["command"] == "continue" and obj["ok"] is True
         assert "b change" in repo.git("log", "--oneline", "b")  # b is rebased onto main
@@ -148,7 +148,7 @@ class TestContinue:
 
         (wt_a / "shared.txt").write_text("resolved")
         repo.git("add", "shared.txt", cwd=wt_a)
-        main(["continue", "--json"])
+        main(["continue", "main", "--json"])  # cascade began at main, so resume spans the tree
         assert json.loads(capsys.readouterr().out)["ok"] is True
 
         main(["--json"])
@@ -159,8 +159,10 @@ class TestContinue:
     def test_resume_errors_cleanly_on_worktreeless_branch(
         self, repo: RepoHelper, capsys, tmp_path
     ) -> None:
-        # The whole-tree resume can reach a worktree-less branch outside the original scope; it
-        # must produce a clean precondition error, not a raw AssertionError deep in _rebase_branch.
+        # A resume whose origin subtree contains a worktree-less branch must produce a clean
+        # precondition error, not a raw AssertionError deep in _rebase_branch. `propagate sub`
+        # conflicts in achild; resuming from the root `main` legitimately spans the tree,
+        # reaching the worktree-less `nowt` (a descendant of main) and erroring cleanly.
         repo.commit("shared.txt", "base", "base")
         repo.branch("sub", parent="main")
         wt_sub = repo.worktree("sub", str(tmp_path / "wt-sub"))
@@ -172,7 +174,7 @@ class TestContinue:
         (wt_sub / "shared.txt").write_text("from sub")
         repo.git("add", "shared.txt", cwd=wt_sub)
         repo.git("commit", "-m", "sub change", cwd=wt_sub)
-        repo.branch("nowt", parent="main")  # worktree-less sibling, outside `propagate sub` scope
+        repo.branch("nowt", parent="main")  # worktree-less, in scope of a resume from main
 
         with pytest.raises(SystemExit) as exc:
             main(["propagate", "sub", "--no-input", "-y"])
@@ -182,7 +184,7 @@ class TestContinue:
         (wt_c / "shared.txt").write_text("resolved")
         repo.git("add", "shared.txt", cwd=wt_c)
         with pytest.raises(SystemExit) as exc:
-            main(["continue", "--json"])
+            main(["continue", "main", "--json"])
         assert exc.value.code == 4  # nowt has no worktree -> clean precondition, not assert
         err = json.loads(capsys.readouterr().out)["error"]
         assert "nowt" in err["branches"]
@@ -190,13 +192,13 @@ class TestContinue:
     def test_unresolved_conflicts_errors(self, repo: RepoHelper, capsys, tmp_path) -> None:
         self._stop_on_conflict(repo, capsys, tmp_path)  # leave it unresolved
         with pytest.raises(SystemExit) as exc:
-            main(["continue", "--json"])
+            main(["continue", "main", "--json"])
         assert exc.value.code == 4
         assert json.loads(capsys.readouterr().out)["error"]["kind"] == "unresolved_conflicts"
 
     def test_no_rebase_in_progress_errors(self, repo: RepoHelper, capsys) -> None:
         with pytest.raises(SystemExit) as exc:
-            main(["continue", "--json"])
+            main(["continue", "main", "--json"])
         assert exc.value.code == 4
         assert json.loads(capsys.readouterr().out)["ok"] is False
 

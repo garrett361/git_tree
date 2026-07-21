@@ -171,7 +171,7 @@ class TestSquashMergeCleanup:
         # Resolve and resume via the documented recovery path.
         (wt_c / "conflict.txt").write_text("resolved\n")
         repo.git("add", "conflict.txt", cwd=wt_c)
-        cmd_continue(argparse.Namespace(no_auto_rerere=False))
+        cmd_continue(argparse.Namespace(no_auto_rerere=False, origin="C"))
 
         graph = discover()
         assert graph.parent_of["C"] == "main"

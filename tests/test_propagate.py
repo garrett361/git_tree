@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import shutil
+from pathlib import Path
 
 import pytest
 
@@ -20,6 +21,10 @@ def _ns(
     return argparse.Namespace(
         dry_run=dry_run, no_auto_rerere=no_auto_rerere, branch=branch, yes=yes
     )
+
+
+def _continue_ns(origin: str, *, no_auto_rerere: bool = False) -> object:
+    return argparse.Namespace(no_auto_rerere=no_auto_rerere, origin=origin)
 
 
 def _no_confirm(_message: str) -> bool:
@@ -505,7 +510,7 @@ class TestContinueMultiWorktree:
 
         # From a neutral cwd (inside neither stuck worktree) continue can't pick a tree.
         with pytest.raises(TreeError) as exc:
-            cmd_continue(argparse.Namespace(no_auto_rerere=False))
+            cmd_continue(_continue_ns("r1"))
         assert exc.value.code == 4
         assert "Multiple worktrees are mid-rebase" in capsys.readouterr().err
         # Nothing was resumed: both still stuck.
@@ -515,7 +520,7 @@ class TestContinueMultiWorktree:
         (wt_c1 / "s1.txt").write_text("resolved")
         repo.git("add", "s1.txt", cwd=wt_c1)
         monkeypatch.chdir(wt_c1)
-        cmd_continue(argparse.Namespace(no_auto_rerere=False))
+        cmd_continue(_continue_ns("r1"))
 
         assert not _has_active_rebase(wt_c1)  # c1 finished
         assert "r1 edits s1.txt" in repo.git("log", "--oneline", "c1")
@@ -546,3 +551,143 @@ class TestStashPopConflict:
         assert repo.git("rev-parse", "b") == repo.git("rev-parse", "main")
         # The failed pop left the collision in the worktree for the user to resolve.
         assert "<<<<<<<" in (wt_b / "x.txt").read_text()
+
+
+class TestContinueOriginScope:
+    """`git tree continue <origin>` resumes from the branch the cascade began at, not the
+    tree root, so branches outside the origin's subtree are never touched."""
+
+    def _tree(self, repo: RepoHelper, *, sibling_conflicts: bool) -> tuple[Path, Path, Path]:
+        """Root R with an out-of-scope sibling S that carries drift, an origin A with no
+        drift, and A's child A1 that conflicts when A's own subtree is propagated. R is
+        advanced on a file none of A/A1/S touch, so today's root-scoped resume rebases the
+        drifted S cleanly (sibling_conflicts=False) or into a conflict (True). Returns the
+        A, A1, S worktrees."""
+        repo.commit("shared.txt", "original", "base shared")
+        repo.git("branch", "R", "main")
+
+        repo.git("branch", "S", "R")
+        repo.set_parent("S", "R")
+        wt_S = repo.worktree("S")
+        s_file = "s-shared.txt" if sibling_conflicts else "s-only.txt"
+        (wt_S / s_file).write_text("S version")
+        repo.git("add", s_file, cwd=wt_S)
+        repo.git("commit", "-m", "S edits its file", cwd=wt_S)
+
+        # Advance R after S forked, so S drifts. On conflict variant R touches the same file
+        # as S; otherwise a file disjoint from everything so A/A1 rebase onto R cleanly.
+        repo.checkout("R")
+        if sibling_conflicts:
+            repo.commit("s-shared.txt", "R version", "R edits s-shared")
+        else:
+            repo.commit("r-advance.txt", "r", "R advances")
+
+        repo.git("branch", "A", "R")  # forked at advanced R: no drift
+        repo.set_parent("A", "R")
+        wt_A = repo.worktree("A")
+        (wt_A / "a-only.txt").write_text("a")
+        repo.git("add", "a-only.txt", cwd=wt_A)
+        repo.git("commit", "-m", "A adds a-only", cwd=wt_A)
+
+        repo.git("branch", "A1", "A")  # forked before A's shared edit -> conflicts
+        repo.set_parent("A1", "A")
+        wt_A1 = repo.worktree("A1")
+        (wt_A1 / "shared.txt").write_text("A1 version")
+        repo.git("add", "shared.txt", cwd=wt_A1)
+        repo.git("commit", "-m", "A1 edits shared", cwd=wt_A1)
+
+        (wt_A / "shared.txt").write_text("A version")
+        repo.git("add", "shared.txt", cwd=wt_A)
+        repo.git("commit", "-m", "A edits shared", cwd=wt_A)
+        return wt_A, wt_A1, wt_S
+
+    def test_continue_leaves_out_of_scope_sibling_untouched(self, repo: RepoHelper) -> None:
+        _wt_A, wt_A1, _wt_S = self._tree(repo, sibling_conflicts=False)
+        s_before = repo.git("rev-parse", "S")
+        s_fork_before = repo.git("config", "branch.S.tree-fork-commit")
+
+        with pytest.raises(SystemExit):
+            cmd_propagate(_ns(branch="A", yes=True))
+        assert _has_active_rebase(wt_A1)
+
+        (wt_A1 / "shared.txt").write_text("resolved")
+        repo.git("add", "shared.txt", cwd=wt_A1)
+        cmd_continue(_continue_ns("A"))
+
+        assert not _has_active_rebase(wt_A1)
+        # A's own subtree was propagated: A1 sits on top of A's shared edit.
+        assert "A edits shared" in repo.git("log", "--oneline", "A1")
+        # The out-of-scope sibling S never moved and its fork boundary is untouched.
+        assert repo.git("rev-parse", "S") == s_before
+        assert repo.git("config", "branch.S.tree-fork-commit") == s_fork_before
+
+    def test_continue_avoids_conflict_on_out_of_scope_sibling(self, repo: RepoHelper) -> None:
+        _wt_A, wt_A1, wt_S = self._tree(repo, sibling_conflicts=True)
+
+        with pytest.raises(SystemExit):
+            cmd_propagate(_ns(branch="A", yes=True))
+        assert _has_active_rebase(wt_A1)
+
+        (wt_A1 / "shared.txt").write_text("resolved")
+        repo.git("add", "shared.txt", cwd=wt_A1)
+        # Resuming A's subtree must not drag the conflicting sibling into a rebase.
+        cmd_continue(_continue_ns("A"))
+
+        assert not _has_active_rebase(wt_A1)
+        assert not _has_active_rebase(wt_S)
+
+    def test_continue_rejects_wrong_origin(self, repo: RepoHelper) -> None:
+        _wt_A, wt_A1, _wt_S = self._tree(repo, sibling_conflicts=False)
+
+        with pytest.raises(SystemExit):
+            cmd_propagate(_ns(branch="A", yes=True))
+        # Resolve first: an unresolved conflict raises code 4 for a *different* reason, which
+        # would mask whether the wrong-origin guard fired.
+        (wt_A1 / "shared.txt").write_text("resolved")
+        repo.git("add", "shared.txt", cwd=wt_A1)
+
+        # A1 (mid-rebase) is neither S nor a descendant of S, so continuing from S is rejected.
+        with pytest.raises(TreeError) as exc:
+            cmd_continue(_continue_ns("S"))
+        assert exc.value.code == 4
+        assert exc.value.kind == "precondition"
+        assert "A1" in exc.value.message and "S" in exc.value.message
+        assert _has_active_rebase(wt_A1)  # nothing resumed
+
+    def test_continue_root_origin_covers_whole_tree(self, repo: RepoHelper) -> None:
+        # Regression guard: when the origin IS the root, resume still spans the whole tree.
+        repo.commit("shared.txt", "original", "base shared")
+        repo.git("branch", "R", "main")
+        repo.git("branch", "C1", "R")
+        repo.set_parent("C1", "R")
+        wt_C1 = repo.worktree("C1")
+        (wt_C1 / "shared.txt").write_text("C1 version")
+        repo.git("add", "shared.txt", cwd=wt_C1)
+        repo.git("commit", "-m", "C1 edits shared", cwd=wt_C1)
+        repo.git("branch", "C2", "R")
+        repo.set_parent("C2", "R")
+        wt_C2 = repo.worktree("C2")
+        (wt_C2 / "c2-only.txt").write_text("c2")
+        repo.git("add", "c2-only.txt", cwd=wt_C2)
+        repo.git("commit", "-m", "C2 adds c2-only", cwd=wt_C2)
+        repo.checkout("R")
+        repo.commit("shared.txt", "R version", "R advances shared")  # C1, C2 both drift
+        c2_before = repo.git("rev-parse", "C2")
+
+        with pytest.raises(SystemExit):
+            cmd_propagate(_ns(branch="R", yes=True))
+        assert _has_active_rebase(wt_C1)
+        (wt_C1 / "shared.txt").write_text("resolved")
+        repo.git("add", "shared.txt", cwd=wt_C1)
+        cmd_continue(_continue_ns("R"))
+
+        assert not _has_active_rebase(wt_C1)
+        assert repo.git("rev-parse", "C2") != c2_before  # the other child was propagated
+        assert "R advances shared" in repo.git("log", "--oneline", "C2")
+
+    def test_conflict_stop_names_origin_in_message(self, repo: RepoHelper, capsys) -> None:
+        self._tree(repo, sibling_conflicts=False)
+        with pytest.raises(SystemExit):
+            cmd_propagate(_ns(branch="A", yes=True))
+        err = capsys.readouterr().err
+        assert "git tree continue A" in err
