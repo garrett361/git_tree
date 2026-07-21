@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -77,8 +78,34 @@ class RepoHelper:
         self.git("config", "core.editor", "true")
 
 
+@pytest.fixture(scope="session")
+def _git_global_config(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A controlled global git config so tests never inherit the developer's ~/.gitconfig,
+    keeping results deterministic across machines. rerere is off here; a test that needs to
+    record a rerere resolution with its own git commands turns it on per-repo via
+    RepoHelper.enable_rerere (repo config overrides this file)."""
+    cfg = tmp_path_factory.mktemp("gitconfig") / "config"
+    cfg.write_text(
+        "[init]\n\tdefaultBranch = main\n"
+        "[user]\n\tname = Test\n\temail = test@test.com\n"
+        "[rerere]\n\tenabled = false\n"
+        "[commit]\n\tgpgsign = false\n"
+        "[tag]\n\tgpgsign = false\n"
+        "[core]\n\tautocrlf = false\n\teditor = true\n"
+    )
+    return cfg
+
+
+@pytest.fixture(autouse=True)
+def _isolate_git_config(monkeypatch: pytest.MonkeyPatch, _git_global_config: Path) -> None:
+    """Route every test's git through the controlled global config and no system config, so
+    results don't depend on the machine's git settings."""
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(_git_global_config))
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+
+
 @pytest.fixture
-def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> RepoHelper:
+def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _isolate_git_config: None) -> RepoHelper:
     origin = tmp_path / "origin.git"
     origin.mkdir()
     _git("init", "--bare", cwd=origin)
