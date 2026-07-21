@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -8,13 +9,14 @@ from pathlib import Path
 import pytest
 
 
-def _git(*args: str, cwd: Path, check: bool = True) -> str:
+def _git(*args: str, cwd: Path, check: bool = True, env: dict[str, str] | None = None) -> str:
     result = subprocess.run(
         ["git", *args],
         cwd=cwd,
         capture_output=True,
         text=True,
         check=check,
+        env=env,
     )
     return result.stdout.strip()
 
@@ -104,20 +106,49 @@ def _isolate_git_config(monkeypatch: pytest.MonkeyPatch, _git_global_config: Pat
     monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
 
 
-@pytest.fixture
-def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _isolate_git_config: None) -> RepoHelper:
-    origin = tmp_path / "origin.git"
-    origin.mkdir()
-    _git("init", "--bare", cwd=origin)
+@pytest.fixture(scope="session")
+def _repo_template(tmp_path_factory: pytest.TempPathFactory, _git_global_config: Path) -> Path:
+    """Build the bare-origin + clone + initial-pushed-commit skeleton ONCE per session. Each
+    `repo` copies this instead of re-running init/clone/commit/push (~7x cheaper per test).
+    Built with the isolated global config baked into the environment so the session fixture
+    doesn't depend on the function-scoped monkeypatch that `repo` uses."""
+    env = {
+        **os.environ,
+        "GIT_CONFIG_GLOBAL": str(_git_global_config),
+        "GIT_CONFIG_SYSTEM": os.devnull,
+    }
+    root = tmp_path_factory.mktemp("repo-template")
 
+    origin = root / "origin.git"
+    origin.mkdir()
+    _git("init", "--bare", cwd=origin, env=env)
+
+    work = root / "work"
+    _git("clone", str(origin), str(work), cwd=root, env=env)
+    _git("config", "user.email", "test@test.com", cwd=work, env=env)
+    _git("config", "user.name", "Test", cwd=work, env=env)
+    (work / "init.txt").write_text("init")
+    _git("add", "init.txt", cwd=work, env=env)
+    _git("commit", "-m", "initial commit", cwd=work, env=env)
+    _git("push", "-u", "origin", "main", cwd=work, env=env)
+
+    return root
+
+
+@pytest.fixture
+def repo(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    _isolate_git_config: None,
+    _repo_template: Path,
+) -> RepoHelper:
+    origin = tmp_path / "origin.git"
     work = tmp_path / "work"
-    _git("clone", str(origin), str(work), cwd=tmp_path)
-    _git("config", "user.email", "test@test.com", cwd=work)
-    _git("config", "user.name", "Test", cwd=work)
+    shutil.copytree(_repo_template / "origin.git", origin)
+    shutil.copytree(_repo_template / "work", work)
+    # The cloned remote URL still points at the template's origin; repoint it at this copy.
+    _git("remote", "set-url", "origin", str(origin), cwd=work)
 
     helper = RepoHelper(work=work, origin=origin)
-    helper.commit("init.txt", "init", "initial commit")
-    helper.push("main")
-
     monkeypatch.chdir(work)
     return helper
