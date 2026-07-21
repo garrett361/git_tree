@@ -1181,10 +1181,14 @@ def cmd_rebuild(args: argparse.Namespace) -> None:
 #    to replay and exited. The branch ref may already be updated. Return "ok".
 #
 # 2. Rebase started but stopped on an empty patch (REBASE_HEAD present, no
-#    unmerged files): a commit's changes are already in the target. Common when
-#    cascading through branches with no unique commits. Loop --skip until done
-#    or a real conflict appears. Must loop — multi-commit branches can have
-#    several empty patches in sequence.
+#    unmerged files): a commit's changes are already in the target, so git
+#    halted waiting for `--skip`. Loop --skip until done or a real conflict
+#    appears (a multi-commit branch can hit several empty patches in a row).
+#    Note: git's default merge backend (>= 2.34) auto-drops empty commits, so
+#    this halt happens only under the legacy apply backend or older git. It is
+#    kept defensively because git-tree pins no rebase backend and inherits the
+#    user's git config; do not prune it as dead without also dropping that
+#    support (verified unreachable on git 2.39's default backend).
 
 
 def _skip_empty_commits(cwd: Path) -> str | None:
