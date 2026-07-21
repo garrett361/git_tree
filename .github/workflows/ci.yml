@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: lint
+            cmd: uv run ruff check .
+          - name: format
+            cmd: uv run ruff format --check .
+          - name: type-check
+            cmd: uv run ty check git_tree/
+          - name: test
+            cmd: uv run pytest tests/ -q
+    env:
+      UV_PYTHON: "3.11"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8
+        with:
+          enable-cache: true
+
+      - name: Configure git for tests
+        if: matrix.name == 'test'
+        run: |
+          git config --global init.defaultBranch main
+          git config --global user.name "CI"
+          git config --global user.email "ci@example.com"
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: ${{ matrix.name }}
+        env:
+          CMD: ${{ matrix.cmd }}
+        run: $CMD
