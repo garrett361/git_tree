@@ -63,43 +63,62 @@ Interactive commands also take flags so they can run unattended:
 
 ## Reshaping the tree
 
-The reshaping commands are small, local edits to the structure. Each below shows the tree before → after:
+The reshaping commands are small, local edits to the structure. Each shows the tree
+before → after; `*` marks the branch you run the command from.
 
 ```
-git tree branch ~/worktrees/rmsnorm-fp8 rmsnorm-fp8   (from fused-rmsnorm-kernel)
+# On fused-rmsnorm-kernel, add a child branch to try an fp8 variant.
+git tree branch ~/worktrees/rmsnorm-fp8 rmsnorm-fp8
 
-  fused-rmsnorm-kernel          fused-rmsnorm-kernel
+  * fused-rmsnorm-kernel        * fused-rmsnorm-kernel
   ├── rmsnorm-triton-bench      ├── rmsnorm-triton-bench
   └── rmsnorm-unit-tests    →   ├── rmsnorm-unit-tests
-                                └── rmsnorm-fp8   ← new
+                                └── rmsnorm-fp8  ← new
 ```
 
 ```
-git tree split                                        (on fsdp2-sharding)
+# On bf16-mixed-precision (which has a child bf16-eval), peel its earlier autocast
+# commits up into a new base branch; the child stays beneath bf16-mixed-precision.
+git tree split
 
-  fsdp2-sharding                fsdp2-comm-hooks   ← new parent
-  └── bf16-mixed-precision  →   └── fsdp2-sharding
-                                    └── bf16-mixed-precision
+  fsdp2-sharding                  fsdp2-sharding
+  └── * bf16-mixed-precision      └── bf16-autocast               ← new base (earlier commits)
+      └── bf16-eval           →       └── * bf16-mixed-precision  (later commits)
+                                          └── bf16-eval           (unchanged)
 ```
 
 ```
-git tree detach && git tree attach fused-rmsnorm-kernel   (re-parent bf16-mixed-precision)
+# On bf16-mixed-precision, peel its later grad-clip commits down into a new child;
+# its existing child bf16-eval follows onto the new branch.
+git tree split --child
 
-  main                              main
-  ├── fused-rmsnorm-kernel          ├── fused-rmsnorm-kernel
-  └── fsdp2-sharding            →   │   └── bf16-mixed-precision
-      └── bf16-mixed-precision      └── fsdp2-sharding
+  fsdp2-sharding                  fsdp2-sharding
+  └── * bf16-mixed-precision      └── * bf16-mixed-precision  (earlier commits, kept)
+      └── bf16-eval           →       └── bf16-grad-clip      ← new child (later commits)
+                                          └── bf16-eval       (followed the new branch)
 ```
 
 ```
-git tree rebase main            (on bf16-mixed-precision, after fsdp2-sharding merges)
+# Move bf16-mixed-precision from fsdp2-sharding over to fused-rmsnorm-kernel.
+git tree detach && git tree attach fused-rmsnorm-kernel
 
-  main                               main
-  └── fsdp2-sharding   (merged)  →   ├── fsdp2-sharding
-      └── bf16-mixed-precision       └── bf16-mixed-precision
+  main                                main
+  ├── fused-rmsnorm-kernel            ├── fused-rmsnorm-kernel
+  └── fsdp2-sharding              →   │   └── * bf16-mixed-precision
+      └── * bf16-mixed-precision      └── fsdp2-sharding
 ```
 
-`git tree rebase` excludes the old parent's now-redundant commits and cascades the result to every descendant, so the whole subtree comes along.
+```
+# fsdp2-sharding was squash-merged into main; re-home bf16-mixed-precision onto main.
+git tree rebase main
+
+  main                                main
+  └── fsdp2-sharding   (merged)   →   ├── fsdp2-sharding
+      └── * bf16-mixed-precision      └── * bf16-mixed-precision
+```
+
+`git tree rebase` excludes the old parent's now-redundant commits and cascades the result to
+every descendant, so the whole subtree comes along.
 
 ## How it works
 
