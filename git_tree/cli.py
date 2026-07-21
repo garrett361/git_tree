@@ -1240,8 +1240,19 @@ def _rebase_onto(
     """Attempt rebase of child onto parent in its worktree. Returns status or exits on conflict."""
     head_before = git("rev-parse", "HEAD", cwd=cwd)
     rr = _rerere_args(auto_rerere)
+    # -c rebase.updateRefs=false: with the user's rebase.updateRefs on, a rebase also relocates
+    # any *other* local branch sitting on a commit in the replayed range. git-tree moves refs only
+    # through its own propagate, so it opts out and touches just the branch it is rebasing.
     result = git_echo(
-        *rr, "rebase", "--no-reapply-cherry-picks", "--onto", parent, fork_point, cwd=cwd
+        "-c",
+        "rebase.updateRefs=false",
+        *rr,
+        "rebase",
+        "--no-reapply-cherry-picks",
+        "--onto",
+        parent,
+        fork_point,
+        cwd=cwd,
     )
 
     if result.returncode == 0:
