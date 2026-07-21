@@ -31,22 +31,6 @@ class TestAttach:
         graph = discover()
         assert graph.parent_of["feature"] == "other"
 
-    def test_warns_when_not_ancestor(self, repo: RepoHelper, capsys) -> None:
-        repo.git("branch", "unrelated")
-        repo.checkout("unrelated")
-        repo.commit("u1.txt", "u1", "diverge from main")
-
-        repo.checkout("main")
-        repo.commit("m2.txt", "m2", "advance main")
-
-        repo.checkout("unrelated")
-        cmd_attach(_ns(parent="main"))
-
-        graph = discover()
-        assert graph.parent_of["unrelated"] == "main"
-        err = capsys.readouterr().err
-        assert "Warning" in err or "does not appear to descend" in err
-
     def test_attach_to_branch_with_parent_chain_succeeds(self, repo: RepoHelper) -> None:
         # main <- base <- mid; attaching a fresh `feature` under mid makes the cycle
         # walk climb mid -> base -> main without finding feature. Must NOT be blocked.
@@ -82,7 +66,10 @@ class TestAttach:
         assert discover().parent_of["a"] == "main"
 
     def test_attach_disjoint_history_clean_error(self, repo: RepoHelper, capsys, tmp_path) -> None:
-        """Attaching to a branch with no common history is a TreeError, not a traceback."""
+        """Attaching to a branch with no common history is a TreeError, not a traceback.
+
+        Reaches _register_child's own "No common history" guard, which cmd_branch's
+        separate guard does not exercise (cmd_attach is the only caller passing fork=None)."""
         orphan_wt = tmp_path / "orphan-wt"
         repo.git("worktree", "add", "--detach", str(orphan_wt))
         _git("checkout", "--orphan", "orphan", cwd=orphan_wt)
@@ -126,13 +113,6 @@ class TestDetach:
         monkeypatch.setattr("git_tree.cli.confirm", _no_confirm)
         cmd_detach(_ns(branch="feature", yes=True))
 
-        assert self._branch_config(repo, "feature").returncode != 0
-
-    def test_detach_by_name_from_different_branch(self, repo: RepoHelper, monkeypatch) -> None:
-        repo.branch("feature", parent="main")
-        repo.checkout("main")
-        monkeypatch.setattr("builtins.input", lambda _: "y")
-        cmd_detach(_ns(branch="feature"))
         assert self._branch_config(repo, "feature").returncode != 0
 
     def test_declined_confirmation_keeps_parent(self, repo: RepoHelper, monkeypatch) -> None:

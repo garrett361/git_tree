@@ -11,12 +11,10 @@ from .conftest import RepoHelper
 
 class TestCurrentBranch:
     def test_rejects_detached_head(self, repo: RepoHelper) -> None:
+        assert current_branch() == "main"
         repo.git("checkout", "--detach")
         with pytest.raises(TreeError):
             current_branch()
-
-    def test_returns_branch_name_when_attached(self, repo: RepoHelper) -> None:
-        assert current_branch() == "main"
 
 
 class TestRoots:
@@ -28,13 +26,6 @@ class TestRoots:
 
         graph = discover()
         assert roots(graph) == ["main", "release"]
-
-    def test_root_of_resolves_each_branch_to_its_own_root(self, repo: RepoHelper) -> None:
-        repo.branch("topic", parent="main")
-        repo.git("branch", "release")
-        repo.branch("feat", parent="release")
-
-        graph = discover()
         # Assert both directions so a helper that always returns the first root can't pass.
         assert root_of(graph, "topic") == "main"
         assert root_of(graph, "feat") == "release"

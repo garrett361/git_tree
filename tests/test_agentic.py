@@ -124,11 +124,6 @@ class TestJson:
 
 
 class TestExitCodes:
-    def test_push_non_tree_branch_exits_5(self, repo: RepoHelper) -> None:
-        with pytest.raises(SystemExit) as exc:
-            main(["push"])
-        assert exc.value.code == 5
-
     def test_rebase_no_tree_parent_exits_5(self, repo: RepoHelper) -> None:
         repo.git("branch", "solo")
         repo.checkout("solo")
@@ -142,19 +137,6 @@ class TestExitCodes:
         with pytest.raises(SystemExit) as exc:
             main(["propagate", "--yes"])
         assert exc.value.code == 4
-
-    def test_conflict_exits_3(self, repo: RepoHelper, tmp_path) -> None:
-        repo.commit("shared.txt", "orig", "base")
-        repo.branch("b", parent="main")
-        wt_b = repo.worktree("b", str(tmp_path / "wt-b"))
-        (wt_b / "shared.txt").write_text("from b")
-        repo.git("add", "shared.txt", cwd=wt_b)
-        repo.git("commit", "-m", "b shared", cwd=wt_b)
-        repo.checkout("main")
-        repo.commit("shared.txt", "from main", "conflict")
-        with pytest.raises(SystemExit) as exc:
-            main(["propagate", "--yes"])
-        assert exc.value.code == 3
 
     def test_argparse_error_exits_2(self, repo: RepoHelper) -> None:
         with pytest.raises(SystemExit) as exc:

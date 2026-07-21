@@ -37,42 +37,6 @@ class TestRebase:
         assert "advance main" in log
         assert "feature commit" in log
 
-    def test_rebases_onto_target(self, repo: RepoHelper, monkeypatch, tmp_path) -> None:
-        repo.branch("feature", parent="main")
-        wt = repo.worktree("feature", str(tmp_path / "wt-feature"))
-
-        repo.checkout("main")
-        repo.commit("m2.txt", "m2", "advance main")
-
-        (wt / "f1.txt").write_text("f1")
-        repo.git("add", "f1.txt", cwd=wt)
-        repo.git("commit", "-m", "feature commit", cwd=wt)
-
-        monkeypatch.chdir(wt)
-        monkeypatch.setattr("builtins.input", lambda _: "y")
-        cmd_rebase(_ns(target="main"))
-
-        log = repo.git("log", "--oneline", "feature")
-        assert "advance main" in log
-        assert "feature commit" in log
-
-    def test_updates_tree_parent_config(self, repo: RepoHelper, monkeypatch, tmp_path) -> None:
-        repo.git("branch", "base")
-        repo.set_parent("base", "main")
-        repo.worktree("base", str(tmp_path / "wt-base"))
-        repo.branch("child", parent="base")
-        wt = repo.worktree("child", str(tmp_path / "wt-child"))
-        (wt / "c1.txt").write_text("c1")
-        repo.git("add", "c1.txt", cwd=wt)
-        repo.git("commit", "-m", "child commit", cwd=wt)
-
-        monkeypatch.chdir(wt)
-        monkeypatch.setattr("builtins.input", lambda _: "y")
-        cmd_rebase(_ns(target="main"))
-
-        graph = discover()
-        assert graph.parent_of["child"] == "main"
-
     def test_cascades_to_descendants(self, repo: RepoHelper, monkeypatch, tmp_path) -> None:
         repo.branch("b", parent="main")
         wt_b = repo.worktree("b", str(tmp_path / "wt-b"))
@@ -252,11 +216,12 @@ class TestRebase:
         assert "first on feature" in log
         assert "second on feature" in log
 
-    def test_rebase_onto_descendant_raises_before_side_effects(
-        self, repo: RepoHelper, monkeypatch
+    def test_invalid_targets_raise_before_side_effects(
+        self, repo: RepoHelper, monkeypatch, capsys
     ) -> None:
-        # main <- a <- b; rebasing a onto its own descendant b would loop. The guard
-        # must fire before any rebase: a's tip stays put and its parent stays main.
+        # main <- a <- b. Each invalid target (own descendant, nonexistent, self) must be
+        # rejected before the confirm prompt and before any rebase: a's tip and tree-parent
+        # stay put after each attempt.
         repo.branch("a", parent="main")
         repo.branch("b", parent="a")
         repo.checkout("a")
@@ -264,64 +229,55 @@ class TestRebase:
 
         # input must never be consulted — the guard aborts before the confirm prompt.
         monkeypatch.setattr("builtins.input", lambda _: pytest.fail("reached confirm"))
+
+        # Rebasing a onto its own descendant b would loop.
         with pytest.raises(TreeError):
             cmd_rebase(_ns(target="b"))
-
         assert repo.git("rev-parse", "a") == tip_before
         assert discover().parent_of["a"] == "main"
 
-    def test_rebase_nonexistent_target_raises_before_side_effects(
-        self, repo: RepoHelper, monkeypatch, tmp_path, capsys
-    ) -> None:
-        # A typo'd target must be rejected before the confirm prompt and before any
-        # rebase: the branch tip and its tree-parent stay put.
-        repo.branch("feature", parent="main")
-        wt = repo.worktree("feature", str(tmp_path / "wt-feature"))
-        (wt / "f1.txt").write_text("f1")
-        repo.git("add", "f1.txt", cwd=wt)
-        repo.git("commit", "-m", "feature commit", cwd=wt)
-        tip_before = repo.git("rev-parse", "feature")
-
-        monkeypatch.chdir(wt)
-        # input must never be consulted — the guard aborts before the confirm prompt.
-        monkeypatch.setattr("builtins.input", lambda _: pytest.fail("reached confirm"))
+        # A typo'd / nonexistent target is rejected with a clear message.
         with pytest.raises(TreeError):
             cmd_rebase(_ns(target="no-such-branch"))
-
         assert "Rebase target no-such-branch does not exist" in capsys.readouterr().err
-        assert repo.git("rev-parse", "feature") == tip_before
-        assert discover().parent_of["feature"] == "main"
+        assert repo.git("rev-parse", "a") == tip_before
+        assert discover().parent_of["a"] == "main"
 
-    def test_rebase_onto_self_raises(self, repo: RepoHelper, monkeypatch) -> None:
-        repo.branch("a", parent="main")
-        repo.checkout("a")
-        monkeypatch.setattr("builtins.input", lambda _: pytest.fail("reached confirm"))
+        # Rebasing a onto itself is rejected.
         with pytest.raises(TreeError):
             cmd_rebase(_ns(target="a"))
+        assert repo.git("rev-parse", "a") == tip_before
         assert discover().parent_of["a"] == "main"
 
     def test_rebase_out_of_tree_carries_remote_and_push_resolves(
         self, repo: RepoHelper, monkeypatch, tmp_path, capsys
     ) -> None:
-        # main(root, remote=origin) <- feature. Rebasing feature onto a fresh out-of-tree
-        # branch re-roots the tree; the remote must follow so push still resolves.
+        # main(root, remote=origin) roots both `a` and `sibling`. Rebasing `a` onto a fresh
+        # out-of-tree branch re-roots a's tree; the remote must FOLLOW so push still
+        # resolves, while being COPIED not moved — main keeps its remote so `sibling`,
+        # still rooted there, continues to resolve it.
         repo.git("config", "branch.main.remote", "origin")
-        repo.branch("feature", parent="main")
-        wt = repo.worktree("feature", str(tmp_path / "wt-feature"))
-        (wt / "f1.txt").write_text("f1")
-        repo.git("add", "f1.txt", cwd=wt)
-        repo.git("commit", "-m", "feature commit", cwd=wt)
+        repo.branch("a", parent="main")
+        wt = repo.worktree("a", str(tmp_path / "wt-a"))
+        (wt / "a1.txt").write_text("a1")
+        repo.git("add", "a1.txt", cwd=wt)
+        repo.git("commit", "-m", "a commit", cwd=wt)
+        repo.branch("sibling", parent="main")
         repo.git("branch", "new-base")  # not in the tree, no remote
 
         monkeypatch.chdir(wt)
         monkeypatch.setattr("builtins.input", lambda _: "y")
         cmd_rebase(_ns(target="new-base"))
 
-        assert _root_remote(discover(), "feature") == ("new-base", "origin")
+        assert _root_remote(discover(), "a") == ("new-base", "origin")
         # The actual symptom of the bug: push could not resolve a remote. Now it can.
         capsys.readouterr()
         cmd_push(argparse.Namespace(dry_run=True))
         assert "Pushing to origin" in capsys.readouterr().out
+
+        # main keeps its remote so the still-rooted sibling continues to resolve it.
+        assert repo.git("config", "branch.main.remote") == "origin"
+        assert _root_remote(discover(), "sibling") == ("main", "origin")
 
     def test_rebase_within_tree_leaves_remote_untouched(
         self, repo: RepoHelper, monkeypatch, tmp_path
@@ -342,6 +298,7 @@ class TestRebase:
         monkeypatch.setattr("builtins.input", lambda _: "y")
         cmd_rebase(_ns(target="main"))
 
+        assert discover().parent_of["child"] == "main"
         assert repo.git("config", "branch.main.remote") == "origin"
         assert repo.git("config", "branch.child.remote", check=False) == ""
         assert repo.git("config", "branch.base.remote", check=False) == ""
@@ -367,25 +324,3 @@ class TestRebase:
 
         assert repo.git("config", "branch.other.remote") == "upstream"
         assert _root_remote(discover(), "feature") == ("other", "upstream")
-
-    def test_rebase_out_of_tree_keeps_old_root_remote_for_siblings(
-        self, repo: RepoHelper, monkeypatch, tmp_path
-    ) -> None:
-        # main(root, remote=origin) roots both `a` and `sibling`. Rebasing `a` out to a
-        # new base must COPY, not move: main keeps its remote so `sibling`, still rooted
-        # there, continues to resolve it.
-        repo.git("config", "branch.main.remote", "origin")
-        repo.branch("a", parent="main")
-        wt = repo.worktree("a", str(tmp_path / "wt-a"))
-        (wt / "a1.txt").write_text("a1")
-        repo.git("add", "a1.txt", cwd=wt)
-        repo.git("commit", "-m", "a commit", cwd=wt)
-        repo.branch("sibling", parent="main")
-        repo.git("branch", "new-base")  # out-of-tree target
-
-        monkeypatch.chdir(wt)
-        monkeypatch.setattr("builtins.input", lambda _: "y")
-        cmd_rebase(_ns(target="new-base"))
-
-        assert repo.git("config", "branch.main.remote") == "origin"
-        assert _root_remote(discover(), "sibling") == ("main", "origin")

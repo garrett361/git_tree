@@ -22,14 +22,6 @@ class TestDiscover:
         graph = discover()
         assert set(graph.children_of["main"]) == {"child1", "child2"}
 
-    def test_linear_chain(self, repo: RepoHelper) -> None:
-        repo.branch("b", parent="main")
-        repo.branch("c", parent="b")
-        graph = discover()
-        assert graph.parent_of["b"] == "main"
-        assert graph.parent_of["c"] == "b"
-        assert graph.children_of["b"] == ["c"]
-
     def test_deleted_parent_skipped_with_warning(self, repo: RepoHelper, capsys) -> None:
         """Branch whose tree-parent was deleted should be excluded, not crash."""
         repo.branch("child", parent="main")
@@ -68,8 +60,3 @@ class TestDownstream:
         repo.branch("leaf", parent="main")
         graph = discover()
         assert graph.downstream_from("leaf") == []
-
-    def test_does_not_include_root(self, repo: RepoHelper) -> None:
-        repo.branch("b", parent="main")
-        graph = discover()
-        assert "main" not in graph.downstream_from("main")

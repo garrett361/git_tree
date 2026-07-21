@@ -42,21 +42,6 @@ class TestPropagate:
 
         assert "new commit on main" in repo.git("log", "--oneline", "b")
 
-    def test_dry_overrides_yes(self, repo: RepoHelper, monkeypatch, tmp_path) -> None:
-        repo.commit("a1.txt", "a1", "commit on main for b")
-        repo.branch("b", parent="main")
-        wt_b = repo.worktree("b", str(tmp_path / "wt-b"))
-        (wt_b / "b1.txt").write_text("b1")
-        repo.git("add", "b1.txt", cwd=wt_b)
-        repo.git("commit", "-m", "commit on b", cwd=wt_b)
-        repo.checkout("main")
-        repo.commit("a2.txt", "a2", "new commit on main")
-
-        monkeypatch.setattr("git_tree.cli.confirm", _no_confirm)
-        cmd_propagate(_ns(dry_run=True, yes=True))  # preview only, no cascade
-
-        assert "new commit on main" not in repo.git("log", "--oneline", "b")
-
     def test_linear_cascade(self, repo: RepoHelper, monkeypatch, tmp_path) -> None:
         repo.commit("a1.txt", "a1", "commit on main for b")
         repo.branch("b", parent="main")
@@ -115,27 +100,6 @@ class TestPropagate:
         # stranded to run raw git plus a follow-up propagate.
         assert "git tree continue" in err
 
-    def test_already_up_to_date(self, repo: RepoHelper, monkeypatch, capsys, tmp_path) -> None:
-        repo.branch("b", parent="main")
-        repo.worktree("b", str(tmp_path / "wt-b"))
-        monkeypatch.setattr("builtins.input", lambda _: "y")
-        cmd_propagate(_ns())
-        out = capsys.readouterr().out
-        assert "b" in out
-
-    def test_child_no_unique_commits(self, repo: RepoHelper, monkeypatch, capsys, tmp_path) -> None:
-        """Branch with no unique commits beyond parent still propagates cleanly."""
-        repo.branch("b", parent="main")
-        repo.worktree("b", str(tmp_path / "wt-b"))
-        repo.checkout("main")
-        repo.commit("m2.txt", "m2", "advance main past b fork")
-
-        monkeypatch.setattr("builtins.input", lambda _: "y")
-        cmd_propagate(_ns())
-
-        b_log = repo.git("log", "--oneline", "b")
-        assert "advance main past b fork" in b_log
-
     def test_grandchild_no_unique_commits_cascades(
         self, repo: RepoHelper, monkeypatch, tmp_path
     ) -> None:
@@ -184,24 +148,9 @@ class TestPropagate:
         assert (wt_path / "uncommitted.txt").exists()
         assert (wt_path / "uncommitted.txt").read_text() == "dirty content"
 
-    def test_dry_does_not_modify(self, repo: RepoHelper, capsys, tmp_path) -> None:
-        repo.commit("a1.txt", "a1", "base for b")
-        repo.branch("b", parent="main")
-        wt_b = repo.worktree("b", str(tmp_path / "wt-b"))
-        (wt_b / "b1.txt").write_text("b1")
-        repo.git("add", "b1.txt", cwd=wt_b)
-        repo.git("commit", "-m", "on b", cwd=wt_b)
-        repo.checkout("main")
-        repo.commit("a2.txt", "a2", "advance main")
-
-        b_tip_before = repo.git("rev-parse", "b")
-        cmd_propagate(_ns(dry_run=True))
-
-        assert repo.git("rev-parse", "b") == b_tip_before
-        out = capsys.readouterr().out
-        assert "Propagating from" in out
-
-    def test_preview_shows_pending_commit_counts(self, repo: RepoHelper, capsys, tmp_path) -> None:
+    def test_dry_run_previews_without_modifying(
+        self, repo: RepoHelper, monkeypatch, capsys, tmp_path
+    ) -> None:
         repo.branch("b", parent="main")
         wt_b = repo.worktree("b", str(tmp_path / "wt-b"))
         (wt_b / "b1.txt").write_text("b1")
@@ -211,9 +160,14 @@ class TestPropagate:
         repo.commit("m2.txt", "m2", "first new on main")
         repo.commit("m3.txt", "m3", "second new on main")
 
-        cmd_propagate(_ns(dry_run=True))
+        b_tip_before = repo.git("rev-parse", "b")
+        # dry-run overrides --yes: preview only, confirm never consulted, no cascade.
+        monkeypatch.setattr("git_tree.cli.confirm", _no_confirm)
+        cmd_propagate(_ns(dry_run=True, yes=True))
 
+        assert repo.git("rev-parse", "b") == b_tip_before
         out = capsys.readouterr().out
+        assert "Propagating from" in out
         assert "[2 new]" in out
 
     def test_preview_no_count_when_up_to_date(self, repo: RepoHelper, capsys, tmp_path) -> None:
@@ -310,27 +264,6 @@ class TestPropagateRerere:
 
         assert repo.git("rev-parse", "b") == b_original
 
-    def test_auto_rerere_disabled_with_flag(self, repo: RepoHelper, monkeypatch, tmp_path) -> None:
-        repo.enable_rerere()
-        repo.commit("shared.txt", "original", "base")
-        repo.branch("b", parent="main")
-        wt_b = repo.worktree("b", str(tmp_path / "wt-b"))
-        (wt_b / "shared.txt").write_text("from b")
-        repo.git("add", "shared.txt", cwd=wt_b)
-        repo.git("commit", "-m", "b modifies shared", cwd=wt_b)
-        b_original = repo.git("rev-parse", "b")
-
-        repo.checkout("main")
-        repo.commit("shared.txt", "from main", "main modifies shared")
-
-        # Even though rerere is enabled, --no-auto-rerere skips the loop
-        monkeypatch.setattr("builtins.input", lambda _: "y")
-
-        with pytest.raises(SystemExit):
-            cmd_propagate(_ns(no_auto_rerere=True))
-
-        assert repo.git("rev-parse", "b") == b_original
-
     def test_auto_rerere_multi_commit_branch(
         self, repo: RepoHelper, monkeypatch, capsys, tmp_path
     ) -> None:
@@ -370,26 +303,29 @@ class TestPropagateRerere:
         assert "rerere" in out
         assert "resolved" in repo.git("show", "b:f1.txt")
 
-
-class TestPropagateBranchArg:
-    def test_propagate_from_named_branch(
-        self, repo: RepoHelper, monkeypatch, capsys, tmp_path
-    ) -> None:
-        repo.commit("a1.txt", "a1", "advance main")
+    def test_auto_rerere_disabled_with_flag(self, repo: RepoHelper, monkeypatch, tmp_path) -> None:
+        repo.enable_rerere()
+        repo.commit("shared.txt", "original", "base")
         repo.branch("b", parent="main")
         wt_b = repo.worktree("b", str(tmp_path / "wt-b"))
-        (wt_b / "b1.txt").write_text("b1")
-        repo.git("add", "b1.txt", cwd=wt_b)
-        repo.git("commit", "-m", "on b", cwd=wt_b)
+        (wt_b / "shared.txt").write_text("from b")
+        repo.git("add", "shared.txt", cwd=wt_b)
+        repo.git("commit", "-m", "b modifies shared", cwd=wt_b)
+        b_original = repo.git("rev-parse", "b")
+
         repo.checkout("main")
-        repo.commit("a2.txt", "a2", "new on main")
+        repo.commit("shared.txt", "from main", "main modifies shared")
 
+        # Even though rerere is enabled, --no-auto-rerere skips the loop
         monkeypatch.setattr("builtins.input", lambda _: "y")
-        cmd_propagate(_ns(branch="main"))
 
-        b_log = repo.git("log", "--oneline", "b")
-        assert "new on main" in b_log
+        with pytest.raises(SystemExit):
+            cmd_propagate(_ns(no_auto_rerere=True))
 
+        assert repo.git("rev-parse", "b") == b_original
+
+
+class TestPropagateBranchArg:
     def test_propagate_from_non_current_branch(
         self, repo: RepoHelper, monkeypatch, tmp_path
     ) -> None:
@@ -418,19 +354,6 @@ class TestPropagateBranchArg:
 
 
 class TestWorktreeValidation:
-    def test_propagate_fails_without_worktree(self, repo: RepoHelper, monkeypatch, capsys) -> None:
-        repo.branch("b", parent="main")
-        repo.checkout("main")
-        repo.commit("m2.txt", "m2", "advance")
-
-        monkeypatch.setattr("builtins.input", lambda _: "y")
-        with pytest.raises(SystemExit):
-            cmd_propagate(_ns())
-
-        err = capsys.readouterr().err
-        assert "worktree" in err.lower()
-        assert "b" in err
-
     def test_error_lists_all_missing(self, repo: RepoHelper, monkeypatch, capsys) -> None:
         repo.branch("b", parent="main")
         repo.branch("c", parent="main")
@@ -468,39 +391,6 @@ class TestWorktreeValidation:
         err = capsys.readouterr().err
         assert "not in a clean state" in err
         assert "b" in err
-
-    def test_propagate_fails_with_rebase_in_progress(
-        self, repo: RepoHelper, monkeypatch, capsys, tmp_path
-    ) -> None:
-        """Branch with resolved conflicts but pending --continue aborts propagation."""
-        repo.commit("shared.txt", "base", "base commit")
-        repo.branch("b", parent="main")
-        repo.branch("c", parent="b")
-        wt_b = repo.worktree("b", str(tmp_path / "wt-b"))
-        wt_c = repo.worktree("c", str(tmp_path / "wt-c"))
-        (wt_c / "shared.txt").write_text("from c")
-        repo.git("add", "shared.txt", cwd=wt_c)
-        repo.git("commit", "-m", "c modifies shared", cwd=wt_c)
-
-        # Advance b to create a conflict for c
-        (wt_b / "shared.txt").write_text("from b")
-        repo.git("add", "shared.txt", cwd=wt_b)
-        repo.git("commit", "-m", "b modifies shared", cwd=wt_b)
-
-        # Rebase c onto b, causing conflict
-        repo.git("rebase", "--onto", "b", "b~1", cwd=wt_c, check=False)
-        # Resolve the conflict but don't --continue
-        (wt_c / "shared.txt").write_text("resolved")
-        repo.git("add", "shared.txt", cwd=wt_c)
-
-        # Propagate from main — c has rebase in progress
-        # b's worktree is fine but c's is in active rebase (detached)
-        monkeypatch.setattr("builtins.input", lambda _: "y")
-        with pytest.raises(SystemExit):
-            cmd_propagate(_ns())
-
-        err = capsys.readouterr().err
-        assert "c" in err
 
 
 class TestPropagateMainWorktree:

@@ -282,18 +282,15 @@ class TestForkAncestorGuard:
 
     def test_non_ancestral_stored_fork_falls_back_to_merge_base(self, repo: RepoHelper) -> None:
         side_tip = self._build_off_line_fork(repo)
-        repo.git("config", "branch.child.tree-fork-commit", side_tip)
-
         mb = repo.git("merge-base", "main", "child")
+
+        # Config path: a non-ancestral fork stored on disk is ignored.
+        repo.git("config", "branch.child.tree-fork-commit", side_tip)
         assert _get_fork_commit("child", "main") == mb
         assert _get_fork_commit("child", "main") != side_tip
 
-    def test_non_ancestral_guard_applies_on_info_path(self, repo: RepoHelper) -> None:
-        # The path propagate actually uses: stored fork arrives via BranchInfo.
-        side_tip = self._build_off_line_fork(repo)
+        # BranchInfo path (the one propagate actually uses): stored fork arrives via info.
         info = BranchInfo(name="child", fork_commit=side_tip)
-
-        mb = repo.git("merge-base", "main", "child")
         assert _get_fork_commit("child", "main", info) == mb
 
     def test_ancestral_fork_honored_despite_merge_base_drift(self, repo: RepoHelper) -> None:

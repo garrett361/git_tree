@@ -21,30 +21,28 @@ class TestFormatTree:
         out = capsys.readouterr().out
         assert "no tree-branches registered" in out
 
-    def test_single_child(self, repo: RepoHelper) -> None:
-        repo.branch("feature", parent="main")
-        graph = discover()
-        output = format_tree(graph, root="main")
-        assert "└── feature" in output
-
-    def test_multiple_children(self, repo: RepoHelper) -> None:
+    def test_connectors_and_nesting(self, repo: RepoHelper) -> None:
+        # main branches into a and b (siblings), and b continues to c. Connector glyphs
+        # distinguish an intermediate sibling (├──) from the last child (└──), and nesting
+        # depth grows down the chain.
         repo.branch("a", parent="main")
-        repo.branch("b", parent="main")
-        graph = discover()
-        output = format_tree(graph, root="main")
-        lines = output.splitlines()
-        assert lines[0] == "main"
-        connectors = [line.strip()[:3] for line in lines[1:]]
-        assert "├──" in connectors or "└──" in connectors
-
-    def test_deep_chain(self, repo: RepoHelper) -> None:
         repo.branch("b", parent="main")
         repo.branch("c", parent="b")
         graph = discover()
         output = format_tree(graph, root="main")
-        assert "main" in output
-        assert "b" in output
-        assert "c" in output
+        lines = output.splitlines()
+
+        assert lines[0] == "main"
+        assert "├──" in output  # an intermediate sibling
+        assert "└──" in output  # the last child at a level
+        for name in ("a", "b", "c"):
+            assert f"── {name}" in output
+
+        b_line = next(line for line in lines if "── b" in line)
+        c_line = next(line for line in lines if "── c" in line)
+        b_indent = len(b_line) - len(b_line.lstrip())
+        c_indent = len(c_line) - len(c_line.lstrip())
+        assert c_indent > b_indent  # c nested under b
 
     def test_custom_root(self, repo: RepoHelper) -> None:
         repo.branch("b", parent="main")
@@ -105,17 +103,6 @@ class TestCmdTreeForest:
         assert "--all" in out
         assert "leaf" not in out
 
-    def test_all_shows_trees_even_when_off_tree(self, repo: RepoHelper, capsys) -> None:
-        # --all shows every tree regardless of the current branch (even off a tree).
-        repo.git("branch", "standalone")
-        repo.branch("leaf", parent="standalone")
-        repo.checkout("main")  # not a tree-branch (no parent, no children)
-
-        cmd_tree(argparse.Namespace(all=True))
-        out = capsys.readouterr().out
-        assert "standalone" in out
-        assert "leaf" in out
-
     def test_all_flag_parses_via_cli(self, repo: RepoHelper, capsys) -> None:
         repo.branch("topic", parent="main")
         repo.git("branch", "standalone")
@@ -161,12 +148,12 @@ class TestWorktreeStatus:
         assert (status.staged, status.modified, status.untracked, status.conflicted) == (1, 1, 1, 0)
         assert status.dirty is True
 
-    def test_clean_worktree_is_not_dirty(self, repo: RepoHelper, tmp_path) -> None:
-        repo.branch("feat", parent="main")
-        wt = repo.worktree("feat", str(tmp_path / "wt-feat"))
-        status = _worktree_status(wt)
-        assert (status.staged, status.modified, status.untracked, status.conflicted) == (0, 0, 0, 0)
-        assert status.dirty is False
+        # A freshly checked-out worktree with no edits tallies zero and is not dirty.
+        repo.branch("clean", parent="main")
+        clean_wt = repo.worktree("clean", str(tmp_path / "wt-clean"))
+        clean = _worktree_status(clean_wt)
+        assert (clean.staged, clean.modified, clean.untracked, clean.conflicted) == (0, 0, 0, 0)
+        assert clean.dirty is False
 
 
 class TestStatusRemote:

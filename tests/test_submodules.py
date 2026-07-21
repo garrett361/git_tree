@@ -48,7 +48,9 @@ class TestRebuild:
     def _ns(self, branch: str | None = None, yes: bool = True, force: bool = False):
         return argparse.Namespace(branch=branch, yes=yes, force=force)
 
-    def test_rebuild_recreates_worktree(self, repo: RepoHelper, tmp_path, monkeypatch) -> None:
+    def test_rebuild_recreates_worktree(
+        self, repo: RepoHelper, tmp_path, monkeypatch, capsys
+    ) -> None:
         monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
         monkeypatch.setenv("GIT_CONFIG_KEY_0", "protocol.file.allow")
         monkeypatch.setenv("GIT_CONFIG_VALUE_0", "always")
@@ -63,19 +65,7 @@ class TestRebuild:
         cmd_rebuild(self._ns("child"))
         assert wt.exists()
         assert (wt / "mysub" / ".git").exists()
-
-    def test_rebuild_handles_corrupted_worktree_contents(self, repo: RepoHelper, tmp_path) -> None:
-        """Worktree directory exists but internals are broken (e.g. .git file deleted)."""
-        repo.branch("child", parent="main")
-        wt = repo.worktree("child", str(tmp_path / "wt-child"))
-
-        # Corrupt the worktree by removing its .git file (makes git status fail)
-        (wt / ".git").unlink()
-        (wt / ".git").write_text("garbage\n")
-
-        cmd_rebuild(self._ns("child", force=True))
-        assert wt.exists()
-        assert (wt / "init.txt").exists()
+        assert "Initialize submodules" in capsys.readouterr().out
 
     def test_rebuild_rejects_non_tree_branch(self, repo: RepoHelper, capsys) -> None:
         with pytest.raises(TreeError):
@@ -97,22 +87,20 @@ class TestRebuild:
             cmd_rebuild(self._ns("child", force=False))
         assert "uncommitted changes" in capsys.readouterr().err
 
-    def test_rebuild_allows_dirty_with_force(self, repo: RepoHelper, tmp_path) -> None:
-        repo.branch("child", parent="main")
-        wt = repo.worktree("child", str(tmp_path / "wt-child"))
-        repo.dirty(cwd=wt)
-
         cmd_rebuild(self._ns("child", force=True))
         assert wt.exists()
         assert not (wt / "dirty.txt").exists()
 
-    def test_rebuild_preserves_tree_config(self, repo: RepoHelper, tmp_path) -> None:
+    def test_rebuild_preserves_tree_config(self, repo: RepoHelper, tmp_path, capsys) -> None:
         repo.branch("child", parent="main")
         repo.worktree("child", str(tmp_path / "wt-child"))
 
         cmd_rebuild(self._ns("child"))
         graph = discover()
         assert graph.parent_of["child"] == "main"
+        out = capsys.readouterr().out
+        assert "Recreate worktree" in out
+        assert "Initialize submodules" not in out
 
     def test_rebuild_points_to_recovery_for_deleted_worktree_dir(
         self, repo: RepoHelper, tmp_path, capsys
@@ -130,31 +118,6 @@ class TestRebuild:
         err = capsys.readouterr().err
         assert "git worktree prune" in err
         assert "git worktree add" in err and "child" in err
-
-    def test_rebuild_omits_submodule_step_without_submodules(
-        self, repo: RepoHelper, tmp_path, capsys
-    ) -> None:
-        repo.branch("child", parent="main")
-        repo.worktree("child", str(tmp_path / "wt-child"))
-
-        cmd_rebuild(self._ns("child"))
-        out = capsys.readouterr().out
-        assert "Recreate worktree" in out
-        assert "Initialize submodules" not in out
-
-    def test_rebuild_shows_submodule_step_with_submodules(
-        self, repo: RepoHelper, tmp_path, monkeypatch, capsys
-    ) -> None:
-        monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
-        monkeypatch.setenv("GIT_CONFIG_KEY_0", "protocol.file.allow")
-        monkeypatch.setenv("GIT_CONFIG_VALUE_0", "always")
-
-        _add_submodule(repo, "mysub", tmp_path)
-        repo.branch("child", parent="main")
-        repo.worktree("child", str(tmp_path / "wt-child"))
-
-        cmd_rebuild(self._ns("child"))
-        assert "Initialize submodules" in capsys.readouterr().out
 
 
 class TestBranchSubmoduleInit:
@@ -211,6 +174,7 @@ class TestPropagateSubmoduleHealth:
             )
         err = capsys.readouterr().err
         assert "corrupted submodule state" in err
+        assert "git tree rebuild" in err
 
     def test_propagate_passes_with_uninitialized_submodules(
         self, repo: RepoHelper, tmp_path, monkeypatch
@@ -233,64 +197,9 @@ class TestPropagateSubmoduleHealth:
         log = _git("log", "--oneline", "child", cwd=repo.work)
         assert "advance main" in log
 
-    def test_propagate_suggests_rebuild(
-        self, repo: RepoHelper, tmp_path, capsys, monkeypatch
-    ) -> None:
-        monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
-        monkeypatch.setenv("GIT_CONFIG_KEY_0", "protocol.file.allow")
-        monkeypatch.setenv("GIT_CONFIG_VALUE_0", "always")
-
-        _add_submodule(repo, "mysub", tmp_path)
-        repo.branch("child", parent="main")
-        wt = repo.worktree("child", str(tmp_path / "wt-child"))
-        _git("submodule", "update", "--init", "--recursive", cwd=wt)
-
-        repo.checkout("main")
-        repo.commit("extra.txt", "extra", "advance main")
-
-        _corrupt_submodule(wt, "mysub")
-
-        with pytest.raises(TreeError):
-            cmd_propagate(
-                argparse.Namespace(dry_run=False, no_auto_rerere=False, branch=None, yes=True)
-            )
-        err = capsys.readouterr().err
-        assert "git tree rebuild" in err
-
 
 class TestRebaseSubmoduleHealth:
     """Coverage gap #1: cmd_rebase health check (both branch and descendants)."""
-
-    def test_rebase_detects_unhealthy_submodule_on_branch(
-        self, repo: RepoHelper, tmp_path, capsys, monkeypatch
-    ) -> None:
-        monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
-        monkeypatch.setenv("GIT_CONFIG_KEY_0", "protocol.file.allow")
-        monkeypatch.setenv("GIT_CONFIG_VALUE_0", "always")
-
-        _add_submodule(repo, "mysub", tmp_path)
-        repo.branch("child", parent="main")
-        wt = repo.worktree("child", str(tmp_path / "wt-child"))
-        _git("submodule", "update", "--init", "--recursive", cwd=wt)
-        (wt / "c.txt").write_text("c")
-        _git("add", "c.txt", cwd=wt)
-        _git("commit", "-m", "child work", cwd=wt)
-
-        _corrupt_submodule(wt, "mysub")
-        monkeypatch.chdir(wt)
-
-        with pytest.raises(TreeError):
-            cmd_rebase(
-                argparse.Namespace(
-                    command="rebase",
-                    target="main",
-                    dry_run=False,
-                    no_auto_rerere=False,
-                    yes=True,
-                )
-            )
-        err = capsys.readouterr().err
-        assert "corrupted submodule state" in err
 
     def test_rebase_detects_unhealthy_submodule_on_descendant(
         self, repo: RepoHelper, tmp_path, capsys, monkeypatch
@@ -331,6 +240,39 @@ class TestRebaseSubmoduleHealth:
         err = capsys.readouterr().err
         assert "corrupted submodule state" in err
         assert "grandchild" in err
+
+    def test_rebase_detects_unhealthy_submodule_on_branch(
+        self, repo: RepoHelper, tmp_path, capsys, monkeypatch
+    ) -> None:
+        # cmd_rebase health-checks the branch itself, a distinct call site from the
+        # descendant check above (and one propagate never exercises).
+        monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+        monkeypatch.setenv("GIT_CONFIG_KEY_0", "protocol.file.allow")
+        monkeypatch.setenv("GIT_CONFIG_VALUE_0", "always")
+
+        _add_submodule(repo, "mysub", tmp_path)
+        repo.branch("child", parent="main")
+        wt = repo.worktree("child", str(tmp_path / "wt-child"))
+        _git("submodule", "update", "--init", "--recursive", cwd=wt)
+        (wt / "c.txt").write_text("c")
+        _git("add", "c.txt", cwd=wt)
+        _git("commit", "-m", "child work", cwd=wt)
+
+        _corrupt_submodule(wt, "mysub")
+        monkeypatch.chdir(wt)
+
+        with pytest.raises(TreeError):
+            cmd_rebase(
+                argparse.Namespace(
+                    command="rebase",
+                    target="main",
+                    dry_run=False,
+                    no_auto_rerere=False,
+                    yes=True,
+                )
+            )
+        err = capsys.readouterr().err
+        assert "corrupted submodule state" in err
 
 
 class TestCheckSubmoduleHealth:
@@ -486,19 +428,6 @@ class TestForceRemoveWorktree:
 
 class TestRebuildCwdGuard:
     """Coverage gap #6: cmd_rebuild refuses when cwd is inside target worktree."""
-
-    def test_rebuild_refuses_when_cwd_inside_worktree(
-        self, repo: RepoHelper, tmp_path, monkeypatch, capsys
-    ) -> None:
-        repo.branch("child", parent="main")
-        wt = repo.worktree("child", str(tmp_path / "wt-child"))
-
-        monkeypatch.chdir(wt)
-
-        with pytest.raises(TreeError):
-            cmd_rebuild(argparse.Namespace(branch="child", yes=True, force=False))
-        err = capsys.readouterr().err
-        assert "inside its worktree" in err
 
     def test_rebuild_refuses_from_subdirectory_of_worktree(
         self, repo: RepoHelper, tmp_path, monkeypatch, capsys

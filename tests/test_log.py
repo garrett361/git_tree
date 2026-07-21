@@ -63,8 +63,14 @@ class TestLog:
         with pytest.raises(SystemExit) as exc:
             cmd_log(argparse.Namespace(extra=[]))
         assert exc.value.code == 0
-        out = capsys.readouterr().out
-        assert out.strip() == "Not on a tree-branch."
+        assert capsys.readouterr().out.strip() == "Not on a tree-branch."
+
+        # A real branch with no tree config is likewise not a tree-branch.
+        repo.git("checkout", "-b", "scratch")
+        with pytest.raises(SystemExit) as exc:
+            cmd_log(argparse.Namespace(extra=[]))
+        assert exc.value.code == 0
+        assert capsys.readouterr().out.strip() == "Not on a tree-branch."
 
     def test_follows_current_branch_root(self, repo: RepoHelper, capture) -> None:
         # Two trees with non-overlapping messages. `release` forks before main's unique
@@ -88,13 +94,6 @@ class TestLog:
 
     def test_detached_head_is_not_a_tree_branch(self, repo: RepoHelper, capsys) -> None:
         repo.git("checkout", "--detach")
-        with pytest.raises(SystemExit) as exc:
-            cmd_log(argparse.Namespace(extra=[]))
-        assert exc.value.code == 0
-        assert capsys.readouterr().out.strip() == "Not on a tree-branch."
-
-    def test_untracked_branch_is_not_a_tree_branch(self, repo: RepoHelper, capsys) -> None:
-        repo.git("checkout", "-b", "scratch")  # real branch, no tree config
         with pytest.raises(SystemExit) as exc:
             cmd_log(argparse.Namespace(extra=[]))
         assert exc.value.code == 0

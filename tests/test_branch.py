@@ -15,21 +15,12 @@ def _ns(command: str = "branch", **kwargs: str) -> object:
 
 class TestBranch:
     def test_creates_branch_with_parent_config(self, repo: RepoHelper, tmp_path) -> None:
+        head_before = repo.head
         cmd_branch(_ns(name="child", path=str(tmp_path / "wt-child")))
         graph = discover()
         assert graph.parent_of["child"] == "main"
-
-    def test_branch_starts_at_current_head(self, repo: RepoHelper, tmp_path) -> None:
-        head_before = repo.head
-        cmd_branch(_ns(name="child", path=str(tmp_path / "wt-child")))
-        child_tip = repo.git("rev-parse", "child")
-        assert child_tip == head_before
-
-    def test_creates_worktree(self, repo: RepoHelper, tmp_path) -> None:
-        wt_path = str(tmp_path / "wt-child")
-        cmd_branch(_ns(name="child", path=wt_path))
-        result = repo.git("worktree", "list", "--porcelain")
-        assert "child" in result
+        assert repo.git("rev-parse", "child") == head_before
+        assert "child" in repo.git("worktree", "list", "--porcelain")
 
     def test_worktree_add_failure_raises(self, repo: RepoHelper, capsys, tmp_path) -> None:
         # A path that already exists as a file makes `git worktree add` fail; cmd_branch

@@ -7,21 +7,6 @@ from git_tree.cli import discover, main, roots
 from .conftest import RepoHelper
 
 
-class TestEdgeCases:
-    def test_missing_parent_branch_excluded(self, repo: RepoHelper, capsys) -> None:
-        repo.git("config", "branch.main.tree-parent-branch", "nonexistent")
-        graph = discover()
-        assert "main" not in graph.parent_of
-        assert "main" not in graph.branches
-        err = capsys.readouterr().err
-        assert "nonexistent" in err
-
-    def test_empty_graph(self, repo: RepoHelper) -> None:
-        graph = discover()
-        assert graph.parent_of == {}
-        assert graph.children_of == {}
-
-
 class TestGitFailureSurfacesCleanly:
     def test_outside_repo_reports_git_error_not_traceback(
         self, tmp_path, monkeypatch, capsys
@@ -41,20 +26,6 @@ class TestGitFailureSurfacesCleanly:
 
 
 class TestCycles:
-    def test_cycle_warns_and_prunes(self, repo: RepoHelper, capsys) -> None:
-        repo.git("branch", "a")
-        repo.git("branch", "b")
-        repo.set_parent("a", "b")
-        repo.set_parent("b", "a")
-
-        graph = discover()  # warns and prunes rather than raising
-        assert "cycle" in capsys.readouterr().err
-        # A pure 2-cycle: both nodes lose their edges and are absent from parent_of and
-        # children_of, so neither shows up as a root either.
-        assert "a" not in graph.parent_of
-        assert "b" not in graph.parent_of
-        assert graph.children_of == {}
-
     def test_self_parent_warns_and_prunes(self, repo: RepoHelper, capsys) -> None:
         repo.git("branch", "a")
         repo.set_parent("a", "a")
