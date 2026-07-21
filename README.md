@@ -15,7 +15,7 @@ main
 
 Amend the kernel on `fused-rmsnorm-kernel` and `git tree propagate` rebases `rmsnorm-triton-bench` and `rmsnorm-unit-tests` onto the new tip, replaying only each branch's own commits so upstream work never re-conflicts. Land a fix on `main` (say a dataloader change every branch depends on) and it cascades through the entire tree in one command.
 
-git-tree also grows and reshapes the tree: create a child branch, split one branch into two, attach or detach a subtree, or rehome a stack whose base merged upstream. See [Reshaping the tree](#reshaping-the-tree) for what each command does to the structure.
+git-tree also grows and reshapes the tree: create a child branch, split one branch into two, attach or detach a subtree, or rehome a stack whose base merged upstream. See [Examples](#examples) for what each command does to the structure.
 
 By design git-tree is a **light wrapper around plain git**: it automates the bookkeeping of a cascading rebase and nothing more. Every non-trivial git command it runs is echoed with its output, so you always see what it did and can drop back to plain git at any point. Because it rewrites history, it's meant for stacks you own and force-push, not shared branches.
 
@@ -61,10 +61,9 @@ Interactive commands also take flags so they can run unattended:
 - `propagate`, `rebase`, `push`, `remove`, `rebuild`, `detach` accept `-y`/`--yes` to skip the confirmation prompt. (`--dry-run` on `propagate`/`rebase`/`push`/`remove` previews without executing.)
 - `git tree rebuild [branch] [--force]`: rebuilds a worktree whose submodule state is corrupted (broken `.git` pointer, missing modules dir). Refuses if the worktree has uncommitted changes unless `--force` is passed.
 
-## Reshaping the tree
+## Examples
 
-The reshaping commands are small, local edits to the structure. Each shows the tree
-before → after; `*` marks the branch you run the command from.
+Each example shows the tree before → after; `*` marks the branch you run the command from.
 
 ```
 # On fused-rmsnorm-kernel, add a child branch to try an fp8 variant.
@@ -147,7 +146,7 @@ After adding commits to a parent branch, run `git tree propagate` to rebase all 
 
 ### Rebase
 
-`git tree rebase <target>` (for when a parent is squash-merged upstream, see [Reshaping the tree](#reshaping-the-tree)) is equivalent to: `git rebase --onto <target> <fork-point>` + `git tree attach <target>` + `git tree propagate`.
+`git tree rebase <target>` (for when a parent is squash-merged upstream, see [Examples](#examples)) is equivalent to: `git rebase --onto <target> <fork-point>` + `git tree attach <target>` + `git tree propagate`.
 
 ### Push
 
