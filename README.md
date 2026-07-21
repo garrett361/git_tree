@@ -169,7 +169,7 @@ Works immediately after `git tree branch` or `git tree attach`, which record the
 
 ### Propagate
 
-After adding commits to a parent branch, run `git tree propagate` to rebase all descendants. Branches are processed in topological order (parents first), and each branch's result is printed as it completes. On conflict the cascade stops: the branches already rebased are shown, then git-tree exits (code 3) telling you where to resolve. Resolve the conflict and `git add` the files, then run `git tree continue` to finish the rebase, record the new fork point, and continue to the remaining descendants (it replaces the old `git rebase --continue` + `git tree propagate <parent>` two-step).
+After adding commits to a parent branch, run `git tree propagate` to rebase all descendants. Branches are processed in topological order (parents first), and each branch's result is printed as it completes. On conflict the cascade stops: the branches already rebased are shown, then git-tree exits (code 3) telling you where to resolve. Resolve the conflict and `git add` the files, then run `git tree continue` to finish the rebase, record the new fork point, and continue to the remaining descendants (it replaces the old `git rebase --continue` + `git tree propagate <parent>` two-step). A resolution you make is auto-replayed on later branches that hit the same conflict (git rerere); disable with `--no-auto-rerere`.
 
 ### Rebase
 
