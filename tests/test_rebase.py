@@ -239,7 +239,7 @@ class TestRebase:
         # A typo'd / nonexistent target is rejected with a clear message.
         with pytest.raises(TreeError):
             cmd_rebase(_ns(target="no-such-branch"))
-        assert "Rebase target no-such-branch does not exist" in capsys.readouterr().err
+        assert "is not a local branch" in capsys.readouterr().err
         assert repo.git("rev-parse", "a") == tip_before
         assert discover().parent_of["a"] == "main"
 
@@ -247,6 +247,14 @@ class TestRebase:
         with pytest.raises(TreeError):
             cmd_rebase(_ns(target="a"))
         assert repo.git("rev-parse", "a") == tip_before
+        assert discover().parent_of["a"] == "main"
+
+        # A bare commit (or tag) is rejected: tree-parents must be local branches, else the
+        # written edge would orphan `a` on the next discover().
+        commit_sha = repo.git("rev-parse", "main")
+        with pytest.raises(TreeError):
+            cmd_rebase(_ns(target=commit_sha))
+        assert "is not a local branch" in capsys.readouterr().err
         assert discover().parent_of["a"] == "main"
 
     def test_rebase_out_of_tree_carries_remote_and_push_resolves(

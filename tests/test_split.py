@@ -10,8 +10,16 @@ from .conftest import RepoHelper
 
 
 def _ns(**kwargs) -> object:
-    # cmd_split reads each field via getattr; supply the split fields explicitly.
-    fields = {"after": None, "name": None, "child": False, "worktree": None, "no_worktree": False}
+    # cmd_split reads each field via getattr; supply the split fields explicitly. `yes` defaults
+    # to True so mechanics tests skip the --child rewind confirmation (its own tests set yes=False).
+    fields = {
+        "after": None,
+        "name": None,
+        "child": False,
+        "worktree": None,
+        "no_worktree": False,
+        "yes": True,
+    }
     fields.update(kwargs)
     return argparse.Namespace(command="split", **fields)
 
@@ -250,6 +258,39 @@ class TestSplitChild:
         assert graph.parent_of["later"] == "feature"
         assert repo.git("config", "branch.later.tree-fork-commit") == c1
         assert "branch refs/heads/later" not in repo.git("worktree", "list", "--porcelain")
+
+    def test_child_declining_confirmation_aborts_before_any_mutation(
+        self, repo: RepoHelper, monkeypatch
+    ) -> None:
+        c1, _c2, _c3 = self._feature(repo)
+        tip = repo.git("rev-parse", "feature")
+        monkeypatch.setattr("git_tree.cli.fzf_select", _no_prompt)
+        monkeypatch.setattr("builtins.input", lambda _: "n")  # decline the rewind
+
+        cmd_split(_ns(child=True, after=c1, name="later", no_worktree=True, yes=False))
+
+        # reset --hard never ran and no branch was created.
+        assert repo.git("rev-parse", "feature") == tip
+        assert repo.git("rev-parse", "HEAD") == tip
+        branches = repo.git("for-each-ref", "--format=%(refname:short)", "refs/heads/").split()
+        assert "later" not in branches
+
+    def test_child_no_input_requires_yes(self, repo: RepoHelper, monkeypatch) -> None:
+        c1, _c2, _c3 = self._feature(repo)
+        tip = repo.git("rev-parse", "feature")
+        monkeypatch.setattr("git_tree.cli.fzf_select", _no_prompt)
+        monkeypatch.setattr("builtins.input", _no_prompt)  # must not prompt under --no-input
+
+        with pytest.raises(TreeError) as exc:
+            cmd_split(
+                _ns(child=True, after=c1, name="later", no_worktree=True, yes=False, no_input=True)
+            )
+        assert exc.value.code == 4
+        assert exc.value.kind == "confirmation_required"
+        # nothing mutated
+        assert repo.git("rev-parse", "feature") == tip
+        branches = repo.git("for-each-ref", "--format=%(refname:short)", "refs/heads/").split()
+        assert "later" not in branches
 
     def test_child_creates_worktree(self, repo: RepoHelper, monkeypatch, tmp_path) -> None:
         c1, _c2, _c3 = self._feature(repo)

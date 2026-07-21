@@ -1562,8 +1562,15 @@ def cmd_rebase(args: argparse.Namespace) -> None:
     if not git_ok("rev-parse", "--verify", old_parent):
         raise TreeError(f"Old parent {old_parent} does not exist.")
 
-    if not git_ok("rev-parse", "--verify", target):
-        raise TreeError(f"Rebase target {target} does not exist.")
+    # The target becomes branch's tree-parent, and tree-parents are always local branches
+    # (discover() flags any non-branch parent as orphaned). Reject a tag/commit/remote-tracking
+    # ref up front rather than writing an edge the next discover() would break.
+    if not git_ok("rev-parse", "--verify", "--quiet", f"refs/heads/{target}"):
+        raise TreeError(
+            f"Rebase target '{target}' is not a local branch; git-tree can only reparent onto "
+            f"a local branch. Create it first, or pick an existing branch.",
+            code=4,
+        )
 
     if target == branch:
         raise TreeError(f"Cannot rebase {branch} onto itself.")
@@ -1804,6 +1811,17 @@ def _split_child(
             f"diverge until your next `git tree push`.",
             file=sys.stderr,
         )
+
+    # Confirm before the destructive rewind: reset --hard rewrites branch's worktree to the split
+    # commit (its later commits are preserved on new_name, created just below). This is the one
+    # split path that rewinds a worktree, so it confirms like the other destructive commands.
+    moved_count = len(git_lines("log", "--oneline", f"{commit_hash}..{old_head}"))
+    if not _proceed(
+        args,
+        f"Rewind {branch} to the split commit (git reset --hard) and move its {moved_count} "
+        f"later commit(s) onto {new_name}?",
+    ):
+        return
 
     # Create the new child at the old tip BEFORE rewinding, so no commit is lost.
     if not git_echo_ok("branch", new_name, old_head):
@@ -2137,7 +2155,8 @@ _git-tree() {
                 '--name[New branch name]:name:' \
                 '--child[Keep current branch for early commits; new branch takes the rest]' \
                 '--worktree[Create the new branch worktree]:path:_directories' \
-                '--no-worktree[Do not create a worktree for the new branch]'
+                '--no-worktree[Do not create a worktree for the new branch]' \
+                '(-y --yes)'{-y,--yes}'[Skip the --child rewind confirmation]'
             ;;
         attach)
             _arguments ':branch:__git_heads'
@@ -2218,7 +2237,7 @@ _git_tree() {
             ;;
         split)
             if [[ "$cur" == -* ]]; then
-                local opts="--after --name --child --worktree --no-worktree"
+                local opts="--after --name --child --worktree --no-worktree -y --yes"
                 COMPREPLY=($(compgen -W "$opts" -- "$cur"))
             fi
             ;;
@@ -2513,6 +2532,9 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     split_wt.add_argument(
         "--no-worktree", action="store_true", help="Don't create a worktree for the new branch"
+    )
+    split_p.add_argument(
+        "-y", "--yes", action="store_true", help="Skip the --child rewind confirmation prompt"
     )
 
     push_p = sub.add_parser("push", help="Push current branch + descendants", parents=[common])
