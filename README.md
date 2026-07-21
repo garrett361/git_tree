@@ -48,13 +48,22 @@ git tree detach                        # remove current branch from tree (keeps 
 git tree remove [branch]               # remove a subtree's worktrees + unregister its branches (keeps refs)
 git tree rebuild [branch]              # rebuild a corrupted worktree from the branch tip (keeps branch + tree config)
 git tree propagate                     # cascade current branch's changes to descendants
-git tree continue                      # resume a cascade after resolving a conflict
+git tree continue                      # resume a cascade after a conflict (re-propagates the whole tree)
 git tree rebase <target>               # rebase current branch + descendants onto new base
 git tree split                         # split current branch into parent + child
 git tree push                          # push current branch + descendants (--force-with-lease)
 git tree manpage [--install]           # emit the man page (roff); --install writes it to the man path
 git tree --version                     # print git-tree <version>
 ```
+
+> **These commands touch more than the current branch:**
+>
+> - **`propagate`, `rebase`, `push`**: the current branch and all its descendants (rebase or force-push the whole subtree).
+> - **`continue`**: re-propagates from the tree root, i.e. the entire tree.
+> - **`remove`**: deletes worktrees and unregisters the entire subtree (branch refs are kept).
+> - **`split --child`**: re-points the current branch's existing child branches onto the new branch.
+>
+> `propagate`/`rebase`/`push`/`remove` support `--dry-run` to preview first.
 
 Interactive commands also take flags so they can run unattended:
 
