@@ -23,11 +23,19 @@ By design git-tree is a **light wrapper around plain git**: it automates the boo
 
 ## Install
 
+Direct from github:
+
+```sh
+uv tool install git+https://github.com/garrett361/git_tree
+```
+
+This creates an isolated venv, installs `git-tree`, and symlinks the executable to `~/.local/bin/git-tree`. Git auto-discovers it as `git tree`. Update later with `uv tool upgrade git-tree`.
+
+For local development, install from a clone in editable mode instead:
+
 ```sh
 uv tool install -e /path/to/git_tree
 ```
-
-This creates an isolated venv, installs `git-tree` in editable mode, and symlinks the executable to `~/.local/bin/git-tree`. Git auto-discovers it as `git tree`.
 
 To make `git tree --help` work, install the man page once:
 
