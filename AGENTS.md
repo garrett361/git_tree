@@ -12,6 +12,19 @@ git-tree is a deliberately **light wrapper around plain git**. It automates the 
 - **Explicit and transparent**: prefer surfacing the underlying git operations over hiding them. Side-effecting commands echo the git invocation and reprint git's own output (`git_echo`); `git tree log` streams git directly. Data-query calls and the internal tree-config bookkeeping (the `branch.<name>.tree-*` / root `remote` writes) are captured silently — each command narrates the structural change in prose instead. When in doubt, show the git command and its output rather than a hand-rolled summary.
 - **Standalone**: git-tree lives inside a larger repo today but is written as an independent piece of work that could be `git init`'d into its own repo tomorrow with zero edits. Nothing under `git_tree/` may presume that host or read/write files outside it: use location-neutral paths like `/path/to/git_tree`, keep install/man-page logic self-contained (no external scripts), and let `pyproject.toml` declare everything needed to build alone. A host repo may wrap the install as an *external consumer*, but that wrapper lives on the host's side, never here — such integration is the host's concern, not git-tree's.
 
+## Workflows
+
+### Squash-merge cleanup: bottom of a stack merged into its parent
+
+When a branch `B` is squash-merged into its parent `P` (often `main`) via a PR, `B`'s work reaches `P` as one new squash commit, not as `B`'s original commits. To hoist `B`'s children onto `P` and drop `B`, **move the children first, then remove `B`**:
+
+1. **Update `P` to the post-merge state first** (e.g. `git -C <P-worktree> pull --ff-only`), so `P` actually contains the squashed work. Every later step is only correct once `P` has it.
+2. **Rebase each direct child of `B` onto `P`, from that child's own worktree**: `cd <child-worktree> && git tree rebase P`. This reparents the child onto `P` and replays only the child's own commits (its recorded `tree-fork-commit` is already the correct exclude boundary, so `B`'s commits, now redundant in `P`, are not replayed), cascading to the child's descendants. The child and all its descendants must have clean worktrees. On a conflict, resolve it, `git add` the files, and run `git tree continue` (it finishes the rebase and resumes the cascade). List `B`'s children from `git tree --json` (`B`'s entry carries `children`, and each branch entry carries its `worktree`). Do not hand-edit fork commits; `git tree rebase` manages them.
+3. **Repeat for every direct child.** Order does not matter; each child's subtree is independent.
+4. **`B` is now childless, so drop it**: `git tree remove B` (removes its worktree, keeps the branch ref) or `git tree detach B` (unregisters only). Neither orphans anything now.
+
+Do **not** `detach` or `remove` `B` while it still has children: `detach` would orphan them into a separate tree still based on the merged `B`, and `remove` would tear down the whole subtree. Move the children (step 2) before dropping `B`.
+
 ## Install
 
 ```sh
