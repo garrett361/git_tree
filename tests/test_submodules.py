@@ -17,6 +17,7 @@ from git_tree.cli import (
     cmd_propagate,
     cmd_rebase,
     cmd_rebuild,
+    cmd_remove,
     discover,
 )
 
@@ -119,6 +120,125 @@ class TestRebuild:
         err = capsys.readouterr().err
         assert "git worktree prune" in err
         assert "git worktree add" in err and "child" in err
+
+
+def _allow_file_protocol(monkeypatch) -> None:
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "protocol.file.allow")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "always")
+
+
+class TestRemoveSubmodule:
+    """`git tree remove` force-removes worktrees git itself refuses to remove when they contain
+    submodules, gated on a recursive dirty check with a `--force` override."""
+
+    def _child_with_submodule(self, repo: RepoHelper, tmp_path) -> Path:
+        _add_submodule(repo, "mysub", tmp_path)
+        repo.branch("child", parent="main")
+        wt = repo.worktree("child", str(tmp_path / "wt-child"))
+        _git("submodule", "update", "--init", "--recursive", cwd=wt)
+        assert (wt / "mysub" / ".git").exists()  # submodule initialized in the child worktree
+        return wt
+
+    def _ns(self, force: bool = False):
+        return argparse.Namespace(branch="child", yes=True, force=force)
+
+    def test_removes_clean_submodule_worktree(self, repo, tmp_path, monkeypatch) -> None:
+        _allow_file_protocol(monkeypatch)
+        wt = self._child_with_submodule(repo, tmp_path)
+
+        cmd_remove(self._ns())
+
+        assert not wt.exists()  # the bug: pre-fix git refused and this raised
+        assert repo.git("rev-parse", "--verify", "refs/heads/child")  # branch ref kept
+        assert "child" not in discover().parent_of  # detached from the tree
+
+    def test_dirty_submodule_refuses_without_force(
+        self, repo, tmp_path, monkeypatch, capsys
+    ) -> None:
+        _allow_file_protocol(monkeypatch)
+        wt = self._child_with_submodule(repo, tmp_path)
+        (wt / "mysub" / "dirty.txt").write_text("uncommitted submodule work")
+
+        with pytest.raises(TreeError) as exc:
+            cmd_remove(self._ns(force=False))
+        assert exc.value.code == 4
+        assert "uncommitted changes" in capsys.readouterr().err
+        assert wt.exists()
+
+    def test_dirty_submodule_refuses_even_with_ignore_config(
+        self, repo, tmp_path, monkeypatch
+    ) -> None:
+        _allow_file_protocol(monkeypatch)
+        wt = self._child_with_submodule(repo, tmp_path)
+        repo.git("config", "submodule.mysub.ignore", "all")  # would hide the dirt from plain status
+        (wt / "mysub" / "dirty.txt").write_text("uncommitted")
+
+        with pytest.raises(TreeError) as exc:
+            cmd_remove(self._ns(force=False))  # --ignore-submodules=none overrides the config
+        assert exc.value.code == 4
+        assert wt.exists()
+
+    def test_dirty_nested_submodule_refuses(self, repo, tmp_path, monkeypatch) -> None:
+        _allow_file_protocol(monkeypatch)
+        # A submodule (mysub) that itself contains a submodule (deep).
+        deep = tmp_path / "sub-deep"
+        deep.mkdir()
+        _git("init", cwd=deep)
+        (deep / "d.txt").write_text("deep")
+        _git("add", "d.txt", cwd=deep)
+        _git("commit", "-m", "deep init", cwd=deep)
+        mid = tmp_path / "sub-mid"
+        mid.mkdir()
+        _git("init", cwd=mid)
+        _git("-c", "protocol.file.allow=always", "submodule", "add", str(deep), "deep", cwd=mid)
+        _git("commit", "-m", "add deep", cwd=mid)
+        repo.git("-c", "protocol.file.allow=always", "submodule", "add", str(mid), "mysub")
+        repo.git("commit", "-m", "add mysub")
+        repo.branch("child", parent="main")
+        wt = repo.worktree("child", str(tmp_path / "wt-child"))
+        _git("submodule", "update", "--init", "--recursive", cwd=wt)
+        assert (wt / "mysub" / "deep" / ".git").exists()
+
+        (wt / "mysub" / "deep" / "dirty.txt").write_text("uncommitted deep work")
+
+        with pytest.raises(TreeError) as exc:
+            cmd_remove(self._ns(force=False))  # foreach --recursive reaches the nested submodule
+        assert exc.value.code == 4
+        assert wt.exists()
+
+    def test_dirty_submodule_removed_with_force(self, repo, tmp_path, monkeypatch, capsys) -> None:
+        _allow_file_protocol(monkeypatch)
+        wt = self._child_with_submodule(repo, tmp_path)
+        (wt / "mysub" / "dirty.txt").write_text("uncommitted")
+
+        cmd_remove(self._ns(force=True))
+
+        assert not wt.exists()
+        assert "will destroy uncommitted changes" in capsys.readouterr().out
+
+    def test_refuses_when_cwd_inside_worktree(self, repo, tmp_path, monkeypatch, capsys) -> None:
+        # A mid-rebase worktree is detached (so the name-based "branch you're on" guard won't
+        # fire) yet still tree-mapped, so it WOULD be force-removed out from under a cwd inside
+        # it. The path-based cwd guard (which runs before the dirty gate) must stop that.
+        repo.commit("shared.txt", "base", "base")
+        repo.branch("child", parent="main")
+        wt = repo.worktree("child", str(tmp_path / "wt-child"))
+        (wt / "shared.txt").write_text("child")
+        repo.git("add", "shared.txt", cwd=wt)
+        repo.git("commit", "-m", "child edits shared", cwd=wt)
+        repo.git("branch", "other", "main")
+        repo.checkout("other")
+        repo.commit("shared.txt", "other", "other edits shared")
+        repo.git("rebase", "other", cwd=wt, check=False)  # conflicts -> mid-rebase, detached
+        assert _has_active_rebase(wt)
+        monkeypatch.chdir(wt)
+
+        with pytest.raises(TreeError) as exc:
+            cmd_remove(self._ns())
+        assert exc.value.code == 4
+        assert "inside a worktree being removed" in capsys.readouterr().err
+        assert wt.exists()
 
 
 class TestBranchSubmoduleInit:

@@ -178,9 +178,15 @@ class WorktreeStatus:
     dirty: bool  # any porcelain output at all
 
 
-def _worktree_status(wt: Path) -> WorktreeStatus:
-    """Run `git status --porcelain` once and tally its XY codes."""
-    out = git("status", "--porcelain", cwd=wt)
+def _worktree_status(wt: Path, *, ignore_submodules: str | None = None) -> WorktreeStatus:
+    """Run `git status --porcelain` once and tally its XY codes.
+
+    `ignore_submodules` (e.g. "none") is passed to git as `--ignore-submodules=<val>`,
+    overriding the repo's `diff.ignoreSubmodules` / `submodule.<name>.ignore` config for this
+    one check so a caller that must not miss dirty submodules can force them to be reported.
+    """
+    extra = [f"--ignore-submodules={ignore_submodules}"] if ignore_submodules is not None else []
+    out = git("status", "--porcelain", *extra, cwd=wt)
     staged = modified = untracked = conflicted = 0
     for line in out.splitlines():
         xy = line[:2]
@@ -1063,12 +1069,46 @@ def cmd_detach(args: argparse.Namespace) -> None:
             print("\n\n".join(format_tree(graph, root=r) for r in other_roots))
 
 
+def _remove_blocking_dirt(wt: Path) -> bool:
+    """True if worktree `wt` — or any submodule at any depth — has uncommitted work that a
+    force-removal (`shutil.rmtree`) would irreversibly delete.
+
+    Force-removal bypasses git's own dirty/submodule refusals, so this is the sole backstop
+    and is deliberately conservative: `--ignore-submodules=none` overrides any submodule-ignore
+    config; `foreach --recursive` reaches every depth; a populated-but-uninitialized submodule
+    (which `foreach` skips) and an inner `git status` that errors both count as "cannot prove
+    clean". `--quiet` drops foreach's translated "Entering '<path>'" banner so any remaining
+    stdout is real dirt.
+    """
+    if _worktree_status(wt, ignore_submodules="none").dirty:
+        return True
+    for sub in _submodule_paths(wt):
+        d = wt / sub
+        try:
+            if not (d / ".git").exists() and d.is_dir() and any(d.iterdir()):
+                return True
+        except OSError:
+            return True  # can't inspect it, so can't prove it clean
+    proc = _run(
+        "git",
+        "submodule",
+        "--quiet",
+        "foreach",
+        "--recursive",
+        "git status --porcelain --ignore-submodules=none",
+        cwd=wt,
+        check=False,
+    )
+    return proc.returncode != 0 or bool(proc.stdout.strip())
+
+
 def cmd_remove(args: argparse.Namespace) -> None:
     """Tear down a subtree's worktrees and unregister its branches from the tree.
 
-    This removes worktree directories and unsets tree config; it never deletes a branch
-    ref, so no committed work can be lost. The only data at risk is uncommitted changes,
-    which the clean-worktree gate protects.
+    Removes worktree directories and unsets tree config; it never deletes a branch ref, so no
+    committed work can be lost. Uncommitted work IS at risk (worktrees are force-removed), so by
+    default it refuses if any worktree or submodule is dirty; `--force` overrides that (and
+    destroys the uncommitted work, including inside submodules and git-ignored files).
     """
     graph = discover()
     try:
@@ -1110,30 +1150,90 @@ def cmd_remove(args: argparse.Namespace) -> None:
             f"Switch to a branch outside the subtree first."
         )
 
-    # Safety gate (all-or-nothing): never remove a worktree with uncommitted work. Branch
-    # refs are kept, so committed work is never at risk — only this needs checking.
-    dirty = [b for b in subtree if (info := graph.branches.get(b)) and info.is_dirty]
-    if dirty:
-        lines = ["Refusing to remove — these worktrees have uncommitted changes:"]
+    force = getattr(args, "force", False)
+
+    # cwd guard: force-removal deletes the directory outright (bypassing git's "can't delete the
+    # tree you're standing in" protection), and a following `git worktree prune` from a deleted
+    # cwd errors. Refuse if the shell is inside any worktree being removed.
+    try:
+        cwd = Path.cwd().resolve()
+        inside = [
+            b
+            for b in subtree
+            if (info := graph.branches.get(b))
+            and info.worktree
+            and cwd.is_relative_to(info.worktree.resolve())
+        ]
+        if inside:
+            raise TreeError(
+                f"Your shell is inside a worktree being removed ({', '.join(inside)}). "
+                f"cd to a different directory first.",
+                code=4,
+                branches=inside,
+            )
+    except (OSError, ValueError):
+        pass  # cwd resolution failed; proceed
+
+    # Safety gate (all-or-nothing): worktrees are force-removed, so uncommitted work (in the
+    # worktree OR any submodule at any depth) is at risk. Refuse unless --force. Branch refs are
+    # kept, so committed work is never at risk.
+    dirty = [
+        b
+        for b in subtree
+        if (info := graph.branches.get(b))
+        and info.worktree
+        and _remove_blocking_dirt(info.worktree)
+    ]
+    if dirty and not force:
+        lines = [
+            "Refusing to remove: these worktrees have uncommitted changes "
+            "(possibly inside a submodule):"
+        ]
         lines += [f"  {b}  ({graph.branches[b].worktree})" for b in dirty]
-        lines.append("\nCommit, stash, or discard them first. Nothing was removed.")
+        lines.append(
+            "\nCommit, stash, or discard them, or re-run with --force to remove anyway. "
+            "Nothing was removed."
+        )
         raise TreeError("\n".join(lines), code=4, branches=dirty)
 
     print(f"Removing worktrees and unregistering {target} + its subtree (branch refs kept):")
     print(format_tree(graph, root=target))
+    if dirty:  # implies force
+        print("\nWarning: --force will destroy uncommitted changes (and any git-ignored files) in:")
+        for b in dirty:
+            print(f"  {b}  ({graph.branches[b].worktree})")
     print()
     if getattr(args, "dry_run", False):
         return
     if not _proceed(args, "Remove these worktrees and detach the branches?"):
         return
 
-    # Children-first; stop on the first git failure rather than report false success.
+    # Re-scan once, all-or-nothing, before deleting anything: closes the check->delete window
+    # that plain `git worktree remove` used to guard (a worktree could go dirty during the
+    # prompt). --force already opted out of the gate.
+    if not force:
+        late = [
+            b
+            for b in subtree
+            if (info := graph.branches.get(b))
+            and info.worktree
+            and _remove_blocking_dirt(info.worktree)
+        ]
+        if late:
+            raise TreeError(
+                "These worktrees became dirty after confirmation; nothing was removed:\n"
+                + "\n".join(f"  {b}  ({graph.branches[b].worktree})" for b in late),
+                code=4,
+                branches=late,
+            )
+
+    # Children-first. `_force_remove_worktree` handles submodule worktrees git refuses to remove
+    # and raises TreeError on genuine failure (so removal stops rather than report false success).
     removed_worktrees = 0
     for b in reversed(subtree):
         info = graph.branches.get(b)
         if info and info.worktree:
-            if not git_echo_ok("worktree", "remove", str(info.worktree)):
-                raise TreeError(f"failed to remove {b}'s worktree — stopping (see output above).")
+            _force_remove_worktree(info.worktree, b)
             removed_worktrees += 1
         _unset_tree_config(b)
 
@@ -2372,6 +2472,7 @@ _git-tree() {
             _arguments \
                 '--dry-run[Show what would be done]' \
                 '(-y --yes)'{-y,--yes}'[Skip the confirmation prompt]' \
+                '--force[Remove even with uncommitted changes]' \
                 ':branch:__git_heads'
             ;;
         rebuild)
@@ -2454,7 +2555,7 @@ _git_tree() {
             ;;
         remove)
             if [[ "$cur" == -* ]]; then
-                COMPREPLY=($(compgen -W "--dry-run -y --yes" -- "$cur"))
+                COMPREPLY=($(compgen -W "--dry-run -y --yes --force" -- "$cur"))
             else
                 local branches=$(git for-each-ref --format='%(refname:short)' refs/heads/)
                 COMPREPLY=($(compgen -W "$branches" -- "$cur"))
@@ -2697,6 +2798,11 @@ def _build_parser() -> argparse.ArgumentParser:
     remove_p.add_argument("branch", nargs="?", help="Branch to remove (default: pick via fzf)")
     remove_p.add_argument("--dry-run", action="store_true", help="Show what would be done")
     remove_p.add_argument("-y", "--yes", action="store_true", help="Skip the confirmation prompt")
+    remove_p.add_argument(
+        "--force",
+        action="store_true",
+        help="Remove even if a worktree or its submodules have uncommitted changes",
+    )
 
     rebuild_p = sub.add_parser(
         "rebuild",
