@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from git_tree.cli import cmd_continue, cmd_rebase, cmd_remove, discover
+from git_tree.cli import cmd_propagate, cmd_rebase, cmd_remove, discover
 
 from .conftest import RepoHelper
 
@@ -136,11 +136,11 @@ class TestSquashMergeCleanup:
         assert (wt_c / "f_b1.txt").read_text() == "b1 edited on main\n"
         assert (wt_c / "f_c1.txt").read_text() == "c1\n"
 
-    def test_child_rebase_conflict_resumed_by_continue(
+    def test_child_rebase_conflict_resumed_by_propagate(
         self, repo: RepoHelper, monkeypatch, tmp_path
     ) -> None:
-        """A conflict while hoisting a child onto the merge parent is resolved with
-        `git tree continue`, which finishes the rebase and cascades to the grandchild.
+        """A conflict while hoisting a child onto the merge parent is resolved by re-running
+        `git tree propagate <child>`, which finishes the rebase and cascades to the grandchild.
         B touches only its own file, so its empty replay does not add noise to the conflict."""
         repo.git("branch", "B", "main")
         repo.set_parent("B", "main")
@@ -168,10 +168,12 @@ class TestSquashMergeCleanup:
         with pytest.raises(SystemExit):
             cmd_rebase(_rebase_ns("main"))
 
-        # Resolve and resume via the documented recovery path.
+        # Resolve and resume via the documented recovery path: re-run the propagate of the child.
         (wt_c / "conflict.txt").write_text("resolved\n")
         repo.git("add", "conflict.txt", cwd=wt_c)
-        cmd_continue(argparse.Namespace(no_auto_rerere=False, origin="C"))
+        cmd_propagate(
+            argparse.Namespace(branch="C", dry_run=False, no_auto_rerere=False, yes=False)
+        )
 
         graph = discover()
         assert graph.parent_of["C"] == "main"

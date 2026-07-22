@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 
 import pytest
 
@@ -293,6 +294,19 @@ class TestCompletionsInSync:
             for flag in flags:
                 assert flag in _ZSH_COMPLETION, f"zsh completion missing {name} flag: {flag}"
                 assert flag in _BASH_COMPLETION, f"bash completion missing {name} flag: {flag}"
+
+    def test_no_stale_completion_subcommands(self) -> None:
+        # Reverse direction: a completion must not list a subcommand the parser dropped (e.g. a
+        # deleted `continue`) — the forward checks above wouldn't catch a leftover entry.
+        parser_cmds = set(self._subparsers())
+        bash_cmds = set(re.search(r'subcmds="([^"]*)"', _BASH_COMPLETION).group(1).split())
+        assert bash_cmds <= parser_cmds, (
+            f"bash lists non-parser subcommands: {bash_cmds - parser_cmds}"
+        )
+        zsh_cmds = set(re.findall(r"^\s*'([a-z-]+):", _ZSH_COMPLETION, re.M))
+        assert zsh_cmds <= parser_cmds, (
+            f"zsh lists non-parser subcommands: {zsh_cmds - parser_cmds}"
+        )
 
 
 class TestDryRun:

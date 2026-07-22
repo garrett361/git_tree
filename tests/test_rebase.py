@@ -8,7 +8,7 @@ from git_tree.cli import (
     TreeError,
     _has_active_rebase,
     _root_remote,
-    cmd_continue,
+    cmd_propagate,
     cmd_push,
     cmd_rebase,
     discover,
@@ -342,13 +342,15 @@ class TestRebase:
         assert _root_remote(discover(), "feature") == ("other", "upstream")
 
 
-class TestContinueAfterRebaseScope:
-    def test_continue_after_rebase_leaves_cousin_untouched(
+class TestRebaseResumeViaPropagate:
+    """A `git tree rebase` conflict is resumed with `git tree propagate <branch>` (the reparent
+    is already committed, so propagate finishes the branch onto its new target and cascades)."""
+
+    def test_phase1_conflict_resumed_and_cousin_untouched(
         self, repo: RepoHelper, monkeypatch, tmp_path
     ) -> None:
-        """Rebasing B onto T and resuming the conflict with `continue B` must stay within B's
-        subtree — a drifted cousin C (another child of T) is not this cascade's concern and
-        must not be rebased."""
+        # `rebase B onto T` conflicts on B itself; resume with `propagate B`. Must finish B onto
+        # T and leave T's drifted cousin C untouched (tight scope).
         repo.commit("shared.txt", "original", "base shared")
         repo.git("branch", "R", "main")
         repo.git("branch", "T", "R")
@@ -376,13 +378,59 @@ class TestContinueAfterRebaseScope:
         c_before = repo.git("rev-parse", "C")
 
         monkeypatch.chdir(wt_B)
-        with pytest.raises(SystemExit):
+        with pytest.raises(SystemExit) as exc:
             cmd_rebase(_ns(target="T", yes=True))
         assert _has_active_rebase(wt_B)
+        assert exc.value.remedy == ["git", "tree", "propagate", "B"]
 
         (wt_B / "shared.txt").write_text("resolved")
         repo.git("add", "shared.txt", cwd=wt_B)
-        cmd_continue(argparse.Namespace(no_auto_rerere=False, origin="B"))
+        cmd_propagate(
+            argparse.Namespace(branch="B", dry_run=False, no_auto_rerere=False, yes=False)
+        )
 
         assert not _has_active_rebase(wt_B)
+        assert discover().parent_of["B"] == "T"  # reparent stuck
+        assert "T edits shared" in repo.git("log", "--oneline", "B")  # B finished onto T
         assert repo.git("rev-parse", "C") == c_before  # cousin untouched
+
+    def test_phase2_descendant_conflict_resumed_via_propagate(
+        self, repo: RepoHelper, monkeypatch, tmp_path
+    ) -> None:
+        # `rebase B onto T` succeeds on B, then a descendant D conflicts. Resume with
+        # `propagate B` (message names it); D is finished.
+        repo.commit("shared.txt", "original", "base")
+        repo.git("branch", "T", "main")
+        repo.set_parent("T", "main")
+        wt_T = repo.worktree("T", str(tmp_path / "wt-T"))
+        (wt_T / "shared.txt").write_text("T version")
+        repo.git("add", "shared.txt", cwd=wt_T)
+        repo.git("commit", "-m", "T edits shared", cwd=wt_T)
+
+        repo.git("branch", "B", "main")
+        repo.set_parent("B", "main")
+        wt_B = repo.worktree("B", str(tmp_path / "wt-B"))
+        (wt_B / "b.txt").write_text("b")  # disjoint from shared -> B rebases onto T cleanly
+        repo.git("add", "b.txt", cwd=wt_B)
+        repo.git("commit", "-m", "B adds b", cwd=wt_B)
+
+        repo.git("branch", "D", "B")
+        repo.set_parent("D", "B")
+        wt_D = repo.worktree("D", str(tmp_path / "wt-D"))
+        (wt_D / "shared.txt").write_text("D version")  # conflicts with T's shared once B is on T
+        repo.git("add", "shared.txt", cwd=wt_D)
+        repo.git("commit", "-m", "D edits shared", cwd=wt_D)
+
+        monkeypatch.chdir(wt_B)
+        with pytest.raises(SystemExit) as exc:
+            cmd_rebase(_ns(target="T", yes=True))
+        assert not _has_active_rebase(wt_B)  # B finished
+        assert _has_active_rebase(wt_D)  # D is the stuck one
+        assert exc.value.remedy == ["git", "tree", "propagate", "B"]
+
+        (wt_D / "shared.txt").write_text("resolved")
+        repo.git("add", "shared.txt", cwd=wt_D)
+        cmd_propagate(
+            argparse.Namespace(branch="B", dry_run=False, no_auto_rerere=False, yes=False)
+        )
+        assert not _has_active_rebase(wt_D)

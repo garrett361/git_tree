@@ -55,9 +55,8 @@ git tree attach [parent]               # attach current branch to tree
 git tree detach                        # remove current branch from tree (keeps branch + worktree)
 git tree remove [branch]               # remove a subtree's worktrees + unregister its branches (keeps refs)
 git tree rebuild [branch]              # rebuild a corrupted worktree from the branch tip (keeps branch + tree config)
-git tree propagate                     # cascade current branch's changes to descendants
-git tree continue <origin>             # resume a cascade after a conflict (from the origin branch it began at)
-git tree rebase <target>               # rebase current branch + descendants onto new base
+git tree propagate                     # cascade current branch's changes to descendants (also resumes after a conflict)
+git tree rebase <target>               # reparent + rebase current branch onto <target>, then propagate
 git tree split                         # split current branch into parent + child
 git tree push                          # push current branch + descendants (--force-with-lease)
 git tree log                           # show a git log graph across the whole tree
@@ -70,7 +69,6 @@ git tree --version                     # print git-tree <version>
 > These commands touch more than the current branch:
 >
 > - **`propagate`, `rebase`, `push`**: the current branch and all its descendants (rebase or force-push the whole subtree).
-> - **`continue <origin>`**: resumes the cascade from `origin` (the branch the original `propagate`/`rebase` began at) and its descendants — not the whole tree.
 > - **`remove`**: deletes worktrees and unregisters the entire subtree (branch refs are kept).
 > - **`split --child`**: re-points the current branch's existing child branches onto the new branch.
 >
@@ -84,6 +82,7 @@ Each example shows the tree before → after; `*` marks the branch you run the c
 
 ```
 # On fused-rmsnorm-kernel, add a child branch to try an fp8 variant.
+
 git tree branch ~/worktrees/rmsnorm-fp8 rmsnorm-fp8
 
   * fused-rmsnorm-kernel        * fused-rmsnorm-kernel
@@ -95,6 +94,7 @@ git tree branch ~/worktrees/rmsnorm-fp8 rmsnorm-fp8
 ```
 # On bf16-mixed-precision (which has a child bf16-eval), peel its earlier autocast
 # commits up into a new base branch; the child stays beneath bf16-mixed-precision.
+
 git tree split
 
   fsdp2-sharding                  fsdp2-sharding
@@ -106,6 +106,7 @@ git tree split
 ```
 # On bf16-mixed-precision, peel its later grad-clip commits down into a new child;
 # its existing child bf16-eval follows onto the new branch.
+
 git tree split --child
 
   fsdp2-sharding                  fsdp2-sharding
@@ -116,6 +117,7 @@ git tree split --child
 
 ```
 # Move bf16-mixed-precision from fsdp2-sharding over to fused-rmsnorm-kernel.
+
 git tree detach && git tree attach fused-rmsnorm-kernel
 
   main                                main
@@ -133,13 +135,56 @@ git tree detach && git tree attach fused-rmsnorm-kernel
 #   3. git tree remove fsdp2-sharding   (tear down the merged, now-childless parent)
 
   main                                main
-  └── fsdp2-sharding  (merged)        ├── fsdp2-sharding          (merged; remove it)
-      └── * bf16-mixed-precision  →   └── * bf16-mixed-precision  (re-homed onto main)
-          └── bf16-eval                   └── bf16-eval           (propagated)
+  └── fsdp2-sharding  (merged)    →   └── * bf16-mixed-precision  (re-homed onto main)
+      └── * bf16-mixed-precision           └── bf16-eval           (propagated)
+          └── bf16-eval
 ```
 
-`git tree rebase` excludes the old parent's now-redundant commits and cascades the result to
-every descendant, so the whole subtree comes along.
+(After step 3, `fsdp2-sharding` is gone from the tree; its branch ref is kept.)
+
+`git tree rebase` reparents the current branch onto `<target>` and rebases the branch's own
+commits there, excluding the old parent's now-redundant commits (via the recorded fork boundary,
+so a squash-merged parent's commits drop out), then cascades the result to every descendant.
+Think of it as three steps:
+
+1. `git tree attach <target>`: record the new parent (no history change).
+2. rebase the branch itself onto `<target>`.
+3. `git tree propagate`: cascade the descendants.
+
+The middle step is the part `attach` and `propagate` don't do.
+
+### Resuming after a conflict
+
+When a `propagate` or `rebase` hits a merge conflict, the cascade stops with one worktree
+mid-rebase and prints the exact command to resume with. Resolve the conflicts and `git add`
+them, then **re-run `git tree propagate <branch>`**, naming the branch you were operating on.
+git-tree finishes the interrupted rebase for you (no raw `git rebase --continue`) and continues
+the cascade, scoped to that branch's subtree. A `rebase` conflict resumes the same way: the
+reparent is already recorded when it stops, so `git tree propagate <branch>` finishes the branch's
+rebase onto its new target and cascades.
+
+Example:
+
+```
+# You add commits to the `dataloader` worktree and propagate the change down.
+# Rebasing `augment` conflicts, so the cascade stops mid-rebase.
+
+git tree propagate dataloader
+
+  * dataloader (new commits)     * dataloader
+  └── augment              →      └── augment      ← CONFLICT: cascade stops
+      └── sampler                     └── sampler  (not reached yet)
+
+# Resolve the conflict in augment's worktree, `git add` the files,
+# and finish with `git tree propagate dataloader` (no need for `git rebase --continue`).
+# augment's rebase finishes and propagation continues to sampler.
+
+git tree propagate dataloader
+
+  * dataloader                   * dataloader
+  └── augment              →      └── augment      (resolved + rebased)
+      └── sampler                     └── sampler  (propagated)
+```
 
 ## How it works
 

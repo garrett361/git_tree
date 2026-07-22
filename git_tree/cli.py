@@ -1221,7 +1221,7 @@ def _rebase_onto(
     cwd: Path,
     auto_rerere: bool,
     stashed: bool,
-    origin: str,
+    resume_cmd: list[str],
 ) -> str:
     """Attempt rebase of child onto parent in its worktree. Returns status or exits on conflict."""
     head_before = git("rev-parse", "HEAD", cwd=cwd)
@@ -1253,26 +1253,41 @@ def _rebase_onto(
         # git_echo already reprinted git's stderr above.
         raise TreeError(f"rebase of {child} onto {parent} failed (see output above)")
 
+    return _drive_conflicted_rebase(child, parent, cwd, stashed, auto_rerere, resume_cmd, rr)
+
+
+def _drive_conflicted_rebase(
+    child: str,
+    parent: str,
+    cwd: Path,
+    stashed: bool,
+    auto_rerere: bool,
+    resume_cmd: list[str],
+    rr: list[str],
+) -> str:
+    """A rebase in `cwd` has stopped mid-way. Skip an empty patch; else, with auto_rerere on,
+    replay recorded resolutions (`rerere`), stage them, and `--continue` until it finishes;
+    otherwise stop for the user via `_conflict_exit`. Returns a status string on completion."""
     if not _has_unmerged(cwd):
         status = _skip_empty_commits(cwd)
         if status is not None:
             return status
-        _conflict_exit(child, parent, cwd, stashed, origin)
+        _conflict_exit(child, parent, cwd, stashed, resume_cmd)
 
     if not auto_rerere:
-        _conflict_exit(child, parent, cwd, stashed, origin)
+        _conflict_exit(child, parent, cwd, stashed, resume_cmd)
 
     while True:
         git_echo(*rr, "rerere", cwd=cwd)
 
         remaining = git(*rr, "rerere", "remaining", cwd=cwd, check=False)
         if remaining.strip():
-            _conflict_exit(child, parent, cwd, stashed, origin)
+            _conflict_exit(child, parent, cwd, stashed, resume_cmd)
 
         # git_echo swallows failures (check=False); a failed staging would otherwise loop
         # here forever, so treat it as an unresolvable conflict and stop.
         if not git_echo_ok("add", "-u", cwd=cwd):
-            _conflict_exit(child, parent, cwd, stashed, origin)
+            _conflict_exit(child, parent, cwd, stashed, resume_cmd)
 
         continued = git_echo_ok(*rr, "rebase", "--continue", cwd=cwd, env={"GIT_EDITOR": "true"})
         if continued:
@@ -1283,30 +1298,35 @@ def _rebase_onto(
             status = _skip_empty_commits(cwd)
             if status is not None:
                 return "ok (rerere)"
-            _conflict_exit(child, parent, cwd, stashed, origin)
+            _conflict_exit(child, parent, cwd, stashed, resume_cmd)
 
 
-def _conflict_exit(child: str, parent: str, cwd: Path, stashed: bool, origin: str) -> NoReturn:
-    # `origin` is the branch the cascade began at; the resume must restart from it, not the
-    # stuck child, so both the message and the machine `remedy` name it explicitly.
+def _conflict_exit(
+    child: str, parent: str, cwd: Path, stashed: bool, resume_cmd: list[str]
+) -> NoReturn:
+    # `resume_cmd` is the exact command that resumes this cascade (always a `git tree propagate
+    # <branch>`); both the message and the machine `remedy` name it, and re-running it finishes
+    # the rebase, so the user never runs `git rebase --continue` by hand.
     files = git_lines("diff", "--name-only", "--diff-filter=U", cwd=cwd)
     lines = [f"\nCONFLICT while rebasing {child} onto {parent}"]
     if files:
         lines.append("Conflicted files:")
         lines += [f"  {f}" for f in files]
+    lines.append(f"Resolve the conflicts in {cwd} and `git add` them, then re-run:")
+    lines.append(f"    {' '.join(resume_cmd)}")
     lines.append(
-        f"Resolve the conflicts in {cwd} and `git add` them, then run: git tree continue {origin}"
+        "git-tree finishes the rebase for you; no need to run `git rebase --continue` yourself."
     )
     if stashed:
         lines.append(
-            f"Note: dirty worktree was stashed — after continuing, run: cd {cwd} && git stash pop"
+            f"Note: dirty worktree was stashed — after resuming, run: cd {cwd} && git stash pop"
         )
     raise ConflictError(
         "\n".join(lines),
         branch=child,
         worktree=cwd,
         conflicted_files=files,
-        remedy=["git", "tree", "continue", origin],
+        remedy=resume_cmd,
     )
 
 
@@ -1326,6 +1346,34 @@ def _has_active_rebase(cwd: Path) -> bool:
     return (git_dir_path / "rebase-merge").is_dir() or (git_dir_path / "rebase-apply").is_dir()
 
 
+def _active_rebase_onto(cwd: Path) -> str | None:
+    """The commit the in-progress rebase in `cwd` is replaying onto, read from git's own
+    `rebase-merge/onto` (merge backend) or `rebase-apply/onto` (legacy `am` backend); None
+    if no active rebase or the file is absent. Used to tell git-tree's own cascade rebase
+    (onto == a branch's tree-parent) from an unrelated hand-started one, and to record the
+    fork at the exact base that was replayed."""
+    git_dir_path = _git_dir(cwd)
+    for backend in ("rebase-merge", "rebase-apply"):
+        onto_file = git_dir_path / backend / "onto"
+        if onto_file.exists():
+            sha = onto_file.read_text().strip()
+            return sha or None
+    return None
+
+
+def _active_rebase_branch(cwd: Path) -> str | None:
+    """The branch being rebased by the in-progress rebase in `cwd`, from `rebase-merge/head-name`
+    (or `rebase-apply/head-name`); None if absent or not a `refs/heads/` ref."""
+    git_dir_path = _git_dir(cwd)
+    for backend in ("rebase-merge", "rebase-apply"):
+        head_name = git_dir_path / backend / "head-name"
+        if head_name.exists():
+            ref = head_name.read_text().strip()
+            if ref.startswith("refs/heads/"):
+                return ref.removeprefix("refs/heads/")
+    return None
+
+
 def _has_unmerged(cwd: Path) -> bool:
     """True if the worktree has unmerged (conflicted) index entries."""
     return bool(git("ls-files", "--unmerged", cwd=cwd, check=False).strip())
@@ -1343,27 +1391,62 @@ def _stash_push_if_created(cwd: Path) -> bool:
     return bool(after) and after != before
 
 
-def _require_clean_state(branches: list[str], graph: Graph) -> None:
-    problems = []
+def _require_clean_state(branches: list[str], graph: Graph, resume_cmd: list[str]) -> None:
+    # An in-scope branch that is mid-rebase is a *resume point*, not a failure — PROVIDED the
+    # rebase is git-tree's own cascade (its `onto` is an ancestor-or-equal of the branch's
+    # tree-parent) and its conflicts are resolved; `_advance_branch` will finish it. So:
+    #   - clean git-tree mid-rebase        -> allow
+    #   - git-tree mid-rebase, unmerged    -> refuse: resolve, then re-run resume_cmd
+    #   - foreign mid-rebase (bad onto)    -> refuse: not ours to drive
+    #   - conflicted, not mid-rebase       -> refuse (as before)
+    # Plain dirty (no conflict, no rebase) still passes: `_rebase_branch` stashes it.
+    unresolved: list[tuple[str, Path]] = []
+    foreign: list[tuple[str, Path]] = []
     for b in branches:
         info = graph.branches.get(b)
         if not info or not info.worktree:
             continue
         wt = info.worktree
-        if _worktree_status(wt).conflicted:
-            problems.append((b, wt, "unresolved conflicts"))
-        elif _has_active_rebase(wt):
-            problems.append((b, wt, "rebase in progress"))
-    if not problems:
-        return
-    lines = ["These branches are not in a clean state:"]
-    for b, wt, reason in problems:
-        lines.append(f"  {b}  ({reason} — resolve in: {wt})")
-    raise TreeError("\n".join(lines), code=4, branches=[b for b, _, _ in problems])
+        if _has_active_rebase(wt):
+            parent = graph.parent_of.get(b)
+            actual_onto = _active_rebase_onto(wt)
+            if (
+                parent is None
+                or not actual_onto
+                or not git_ok("merge-base", "--is-ancestor", actual_onto, parent)
+            ):
+                foreign.append((b, wt))
+            elif _has_unmerged(wt):
+                unresolved.append((b, wt))
+            # else: a clean, git-tree-owned mid-rebase — allow (it will be finished).
+        elif _worktree_status(wt).conflicted:
+            unresolved.append((b, wt))
+    if unresolved and not foreign:
+        lines = [
+            "Resolve the conflicts and `git add` them, then re-run:",
+            f"    {' '.join(resume_cmd)}",
+        ]
+        lines += [f"  {b}  (in: {wt})" for b, wt in unresolved]
+        raise TreeError(
+            "\n".join(lines),
+            code=4,
+            kind="unresolved_conflicts",
+            branches=[b for b, _ in unresolved],
+        )
+    if foreign or unresolved:
+        lines = ["These branches are not in a clean state:"]
+        lines += [
+            f"  {b}  (a rebase not started by git-tree is in progress — resolve or "
+            f"`git rebase --abort` in: {wt})"
+            for b, wt in foreign
+        ]
+        lines += [f"  {b}  (unresolved conflicts — resolve in: {wt})" for b, wt in unresolved]
+        raise TreeError("\n".join(lines), code=4, branches=[b for b, _ in foreign + unresolved])
 
 
-def _require_ready(branches: list[str], graph: Graph) -> None:
-    """Preflight gate for a cascade: worktrees present, submodules healthy, worktrees clean.
+def _require_ready(branches: list[str], graph: Graph, resume_cmd: list[str]) -> None:
+    """Preflight gate for a cascade: worktrees present, submodules healthy, worktrees clean
+    (an in-scope git-tree mid-rebase is allowed — it's a resume point, see `_require_clean_state`).
 
     Order matters: worktree and submodule-health checks run before `_require_clean_state`,
     because `git status` crashes on a corrupted submodule. Each underlying check is a no-op
@@ -1371,7 +1454,7 @@ def _require_ready(branches: list[str], graph: Graph) -> None:
     """
     _require_worktrees(branches, graph)
     _require_healthy_submodules(branches, graph)
-    _require_clean_state(branches, graph)
+    _require_clean_state(branches, graph, resume_cmd)
 
 
 # ---------------------------------------------------------------------------
@@ -1492,18 +1575,18 @@ def _rebase_branch(
     info: BranchInfo,
     *,
     auto_rerere: bool,
-    origin: str,
+    resume_cmd: list[str],
 ) -> RebaseResult:
     """Rebase `branch` onto `onto` in its worktree, stashing/popping dirty changes
     and recording the new fork point. Raises (via _rebase_onto) on a real conflict,
     leaving the rebase in progress. A pop conflict is non-fatal (the branch ref is
     already rebased); it's reported via `pop_conflicted` and the worktree is left
-    for the user. `origin` is the cascade's starting branch, surfaced in the resume
-    hint on conflict."""
+    for the user. `resume_cmd` is the command that resumes the cascade, surfaced in
+    the resume hint on conflict."""
     cwd = info.worktree
     assert cwd is not None  # callers guarantee a worktree via _require_worktrees
     stashed = info.is_dirty and _stash_push_if_created(cwd)
-    note = _rebase_onto(branch, onto, fork_point, cwd, auto_rerere, stashed, origin)
+    note = _rebase_onto(branch, onto, fork_point, cwd, auto_rerere, stashed, resume_cmd)
     # Rebase succeeded; record the fork before the pop (which only touches the
     # working tree). `rev-parse(onto)` is stable here — rebasing `branch` never
     # moves `onto`.
@@ -1512,17 +1595,67 @@ def _rebase_branch(
     return RebaseResult(note, pop_conflicted)
 
 
+def _advance_branch(
+    branch: str,
+    parent: str,
+    info: BranchInfo,
+    fork_point: str,
+    *,
+    auto_rerere: bool,
+    resume_cmd: list[str],
+) -> RebaseResult:
+    """Make `branch` rebased onto `parent`: *finish* an in-progress rebase if one is active
+    in its worktree (a resume), else *start* a fresh rebase (`_rebase_branch`). The finish
+    path replays no stash and records the fork at the commit the rebase actually replayed
+    onto, so it stays correct even if `parent` advanced since the rebase began."""
+    cwd = info.worktree
+    assert cwd is not None
+    if not _has_active_rebase(cwd):
+        return _rebase_branch(
+            branch, parent, fork_point, info, auto_rerere=auto_rerere, resume_cmd=resume_cmd
+        )
+
+    # RESUME: an interrupted rebase is sitting in this worktree.
+    actual_onto = _active_rebase_onto(cwd)
+    if actual_onto is not None and not git_ok("merge-base", "--is-ancestor", actual_onto, parent):
+        # Onto is unrelated to the tree-parent: this isn't git-tree's cascade rebase. Don't
+        # silently drive someone else's rebase to a base it wasn't aimed at.
+        raise TreeError(
+            f"{branch} has a rebase in progress that is not onto {parent} (git-tree did not "
+            f"start it). Finish or `git rebase --abort` it in {cwd}.",
+            code=4,
+            branches=[branch],
+        )
+    if _has_unmerged(cwd):
+        raise TreeError(
+            f"{branch} still has unresolved conflicts in {cwd}. Resolve them and `git add` the "
+            f"files, then re-run: {' '.join(resume_cmd)}",
+            code=4,
+            kind="unresolved_conflicts",
+            branches=[branch],
+        )
+    rr = _rerere_args(auto_rerere)
+    git_echo(*rr, "rebase", "--continue", cwd=cwd, env={"GIT_EDITOR": "true"})
+    if _has_active_rebase(cwd):
+        # `--continue` stopped again: a later commit conflicts (drive it through rerere the same
+        # way a fresh rebase does), or it resolved to an empty patch to skip. Never stashes here.
+        _drive_conflicted_rebase(branch, parent, cwd, False, auto_rerere, resume_cmd, rr)
+    # Record the fork at the base the rebase actually replayed onto (may predate a since-moved
+    # `parent`); merge-base fallback in _get_fork_commit self-heals if it ever drifts.
+    _set_fork_commit(branch, actual_onto or git("rev-parse", parent))
+    return RebaseResult("resumed", pop_conflicted=False)
+
+
 def _propagate_descendants(
     branch: str,
     graph: Graph,
     *,
     auto_rerere: bool = True,
-    origin: str | None = None,
+    resume_cmd: list[str] | None = None,
 ) -> list[tuple[str, str]]:
-    # `origin` is the branch the whole cascade began at (defaults to `branch` for a plain
-    # propagate); a conflict deep in the walk surfaces it as the `git tree continue <origin>`
-    # to resume from.
-    origin = origin or branch
+    # `resume_cmd` is the command that resumes this cascade if a descendant conflicts (defaults
+    # to `git tree propagate <branch>`); surfaced in the conflict hint.
+    resume_cmd = resume_cmd or ["git", "tree", "propagate", branch]
     descendants = graph.downstream_from(branch)
     results: list[tuple[str, str]] = []
 
@@ -1532,7 +1665,9 @@ def _propagate_descendants(
         parent = graph.parent_of[child]
         info = graph.branches[child]
         fork_point = _get_fork_commit(child, parent, info)
-        r = _rebase_branch(child, parent, fork_point, info, auto_rerere=auto_rerere, origin=origin)
+        r = _advance_branch(
+            child, parent, info, fork_point, auto_rerere=auto_rerere, resume_cmd=resume_cmd
+        )
         text = "rebased (stash pop conflict - resolve manually)" if r.pop_conflicted else r.note
         # Stream each result as it lands: a mid-cascade conflict raises before this returns,
         # so streaming is what makes the already-rebased branches visible.
@@ -1547,29 +1682,83 @@ def cmd_propagate(args: argparse.Namespace) -> None:
     graph = discover()
 
     descendants = graph.downstream_from(branch)
-    if not descendants:
+    resume_cmd = ["git", "tree", "propagate", branch]
+
+    # `propagate` is also the universal resume: if a conflict stopped an earlier cascade, the
+    # user resolves + `git add` and re-runs this command, which finishes the interrupted rebase
+    # before continuing. The stuck branch is either `branch` itself (a `git tree rebase` left it
+    # mid-rebase) or one of its descendants.
+    info = graph.branches.get(branch)
+    named_mid = bool(info and info.worktree and _has_active_rebase(info.worktree))
+    descendant_mid = any(
+        (di := graph.branches.get(d)) and di.worktree and _has_active_rebase(di.worktree)
+        for d in descendants
+    )
+    is_resume = named_mid or descendant_mid
+
+    # A leaf left mid-rebase by `git tree rebase` still needs finishing, so don't take the
+    # no-descendants shortcut when `branch` itself is the stuck one.
+    if not descendants and not named_mid:
         print("No descendants to propagate to.")
         return
 
-    _require_ready(descendants, graph)
+    _require_ready(descendants, graph, resume_cmd)
 
     print(f"Propagating from {branch}:")
     for line in _subtree_lines(graph, branch, show_counts=True):
         print(line)
     print()
 
-    if getattr(args, "dry_run", False) or not _proceed(args, "Proceed?"):
+    if getattr(args, "dry_run", False):
+        return
+    # A resume continues an already-confirmed cascade — don't re-prompt (this also keeps the
+    # agent `remedy` runnable without -y). Only a fresh propagate asks.
+    if not is_resume and not _proceed(args, "Proceed?"):
         return
     auto_rerere = not getattr(args, "no_auto_rerere", False)
 
     print()
-    _propagate_descendants(branch, graph, auto_rerere=auto_rerere)
+    if named_mid:
+        assert info is not None
+        parent = graph.parent_of.get(branch)
+        if parent is None:
+            raise TreeError(
+                f"{branch} is mid-rebase but has no tree-parent; finish it with "
+                f"`git rebase --continue` in its worktree.",
+                code=4,
+            )
+        _advance_branch(
+            branch,
+            parent,
+            info,
+            _get_fork_commit(branch, parent, info),
+            auto_rerere=auto_rerere,
+            resume_cmd=resume_cmd,
+        )
+        graph = discover()  # branch's tip/fork moved; re-read before cascading
+    _propagate_descendants(branch, graph, auto_rerere=auto_rerere, resume_cmd=resume_cmd)
 
 
 def cmd_rebase(args: argparse.Namespace) -> None:
-    branch = current_branch()
+    try:
+        branch = current_branch()
+    except TreeError:
+        # A detached HEAD here usually means a prior `git tree rebase` conflicted and left this
+        # worktree mid-rebase. Rebase is never the resume verb, so point at the propagate that is
+        # (naming the stuck branch). `git_ok` guards the non-repo case so we don't mask its error.
+        cwd = Path.cwd()
+        if git_ok("rev-parse", "--git-dir", cwd=cwd) and _has_active_rebase(cwd):
+            stuck = _active_rebase_branch(cwd)
+            hint = f"git tree propagate {stuck}" if stuck else "git tree propagate <branch>"
+            raise TreeError(
+                "This worktree is mid-rebase from an earlier `git tree rebase`. Resolve the "
+                f"conflicts and `git add`, then resume with: {hint}",
+                code=4,
+            ) from None
+        raise
     target: str = args.target
     graph = discover()
+    resume_cmd = ["git", "tree", "propagate", branch]
 
     old_parent = graph.parent_of.get(branch) or _get_tree_parent(branch)
     if not old_parent:
@@ -1610,9 +1799,9 @@ def cmd_rebase(args: argparse.Namespace) -> None:
             code=4,
         )
     _require_healthy_submodules([branch], graph)
-    _require_clean_state([branch], graph)
+    _require_clean_state([branch], graph, resume_cmd)
     if descendants:
-        _require_ready(descendants, graph)
+        _require_ready(descendants, graph, resume_cmd)
 
     print(f"Rebasing onto {target}:")
     print(f"  {branch}  [{commit_count} commits]  (old parent: {old_parent})")
@@ -1636,14 +1825,16 @@ def cmd_rebase(args: argparse.Namespace) -> None:
     auto_rerere = not getattr(args, "no_auto_rerere", False)
 
     # Reparent + carry the remote BEFORE the rebase so a conflict leaves config pointing at
-    # the intended new parent, letting `git tree continue <branch>` resume onto `target` uniformly.
-    # (A rare non-conflict rebase failure then leaves config at target with branch unmoved —
-    # a benign, idempotent retry.) Reparenting onto an out-of-tree target re-roots branch's
-    # tree; both roots come from the pre-rebase in-memory graph, which the config write
-    # doesn't perturb: root_of(branch) is the old root, root_of(target) the new.
+    # the intended new parent. That makes a conflict resumable the same way any propagate conflict
+    # is: `git tree propagate <branch>` (the reparent is already committed, so propagate finishes
+    # branch's own rebase onto target, then cascades to descendants).
+    # Reparenting onto an out-of-tree target re-roots branch's tree; both roots come from the
+    # pre-rebase in-memory graph, which the config write doesn't perturb.
     git("config", f"branch.{branch}.tree-parent-branch", target)
     _carry_remote_to_root(root_of(graph, branch), root_of(graph, target))
-    r = _rebase_branch(branch, target, fork_point, info, auto_rerere=auto_rerere, origin=branch)
+    r = _rebase_branch(
+        branch, target, fork_point, info, auto_rerere=auto_rerere, resume_cmd=resume_cmd
+    )
     if r.pop_conflicted:
         print(
             f"Warning: could not pop worktree stash — run: cd {info.worktree} && git stash pop",
@@ -1654,113 +1845,7 @@ def cmd_rebase(args: argparse.Namespace) -> None:
     if descendants:
         print()
         print("Cascading to descendants...")
-        _propagate_descendants(branch, graph, auto_rerere=auto_rerere)
-
-
-def _branch_containing_cwd(branches: list[str], graph: Graph) -> str | None:
-    """The single branch in `branches` whose worktree contains the current directory, else None."""
-    try:
-        cwd = Path.cwd().resolve()
-    except OSError:
-        return None
-    matches = []
-    for b in branches:
-        wt = graph.branches[b].worktree
-        if wt and cwd.is_relative_to(wt.resolve()):  # is_relative_to is true on equality too
-            matches.append(b)
-    return matches[0] if len(matches) == 1 else None
-
-
-def cmd_continue(args: argparse.Namespace) -> None:
-    """Resume a cascade stopped by a conflict: finish the in-progress rebase (with the editor
-    disabled, so no hang), record the new fork point, then resume the cascade from `origin` —
-    the branch the original `propagate`/`rebase` began at. Replaces the raw `git rebase
-    --continue` + `git tree propagate` dance. `origin` must be supplied because the cascade's
-    scope is not recorded anywhere; resuming from the tree root instead would wrongly rebase
-    branches outside the origin's subtree (siblings/cousins that carry their own drift)."""
-    origin = args.origin
-    graph = discover()
-    if not git_ok("rev-parse", "--verify", "--quiet", f"refs/heads/{origin}"):
-        raise TreeError(f"continue origin '{origin}' is not a local branch.", code=4)
-    stuck = [
-        b
-        for b, info in graph.branches.items()
-        if info.worktree and _has_active_rebase(info.worktree)
-    ]
-    if not stuck:
-        raise TreeError("No rebase in progress in any tree worktree — nothing to continue.", code=4)
-    if len(stuck) > 1:
-        # Two independent trees can each be mid-rebase. Disambiguate by the worktree the caller
-        # is in; a bare scan can't target one, so require the caller to be inside it.
-        branch = _branch_containing_cwd(stuck, graph)
-        if branch is None:
-            raise TreeError(
-                f"Multiple worktrees are mid-rebase ({', '.join(sorted(stuck))}); cd into the "
-                f"one you want to resume, then run `git tree continue {origin}`.",
-                code=4,
-            )
-    else:
-        branch = stuck[0]
-    # Guard against a wrong origin: the stuck branch must belong to the cascade being resumed,
-    # i.e. be the origin itself or one of its descendants. This only catches an origin that is
-    # unrelated to the stuck branch; it cannot catch a *mis-scoped* one, since any branch on the
-    # path from a tree root down to the stuck branch passes. Too broad (an ancestor of the true
-    # origin) over-propagates but leaves everything current; too narrow (a descendant of the true
-    # origin still above the stuck branch) silently under-propagates, leaving genuinely-stale
-    # siblings un-rebased. Both are inherent to trusting a caller-supplied scope. If discover()
-    # dropped an intermediate edge as orphaned/cyclic, a legitimate resume is rejected here; that
-    # only happens on a broken tree.
-    if branch != origin and branch not in graph.downstream_from(origin):
-        raise TreeError(
-            f"{branch} is mid-rebase but is not {origin} or a descendant of it; "
-            f"'{origin}' is not the branch this cascade began from.",
-            code=4,
-            kind="precondition",
-            branches=[origin, branch],
-        )
-    wt = graph.branches[branch].worktree
-    assert wt is not None
-    onto = graph.parent_of.get(branch)
-    if onto is None:
-        raise TreeError(
-            f"{branch} is mid-rebase but has no tree-parent; finish it with `git rebase "
-            f"--continue` in {wt}.",
-            code=4,
-        )
-
-    if _has_unmerged(wt):
-        raise TreeError(
-            f"{branch} still has unresolved conflicts in {wt}. Resolve them and `git add` the "
-            f"files, then run `git tree continue {origin}`.",
-            code=4,
-            kind="unresolved_conflicts",
-            branches=[branch],
-        )
-
-    auto_rerere = not getattr(args, "no_auto_rerere", False)
-    git_echo(*_rerere_args(auto_rerere), "rebase", "--continue", cwd=wt, env={"GIT_EDITOR": "true"})
-    if _has_active_rebase(wt):
-        # `--continue` stopped again: either a later commit conflicts, or it resolved to an
-        # empty patch that must be skipped (mirrors the cascade's own handling). `stashed=False`:
-        # a stash from the original run isn't detectable here, and its first conflict already
-        # told the user about it.
-        if _has_unmerged(wt):
-            _conflict_exit(branch, onto, wt, stashed=False, origin=origin)
-        if _skip_empty_commits(wt) is None:
-            _conflict_exit(branch, onto, wt, stashed=False, origin=origin)
-
-    _set_fork_commit(branch, git("rev-parse", onto))
-    print(f"Continued {branch} onto {onto}.")
-    # Resume the cascade from `origin`, the branch it began at — not the tree root. Already-
-    # current descendants replay as empty no-ops; branches outside origin's subtree (siblings,
-    # cousins) are never touched, even if they carry their own drift. Re-discover first so
-    # `branch`'s just-updated tip/fork is reflected.
-    graph = discover()
-    descendants = graph.downstream_from(origin)
-    # Same preflight as cmd_propagate: guard the descendants up front rather than asserting
-    # deep in _rebase_branch.
-    _require_ready(descendants, graph)
-    _propagate_descendants(origin, graph, auto_rerere=auto_rerere, origin=origin)
+        _propagate_descendants(branch, graph, auto_rerere=auto_rerere, resume_cmd=resume_cmd)
 
 
 def _resolve_split_point(after: str, old_fork: str | None) -> str:
@@ -2139,7 +2224,6 @@ _git-tree() {
     subcmds=(
         'propagate:Propagate changes to all descendants'
         'rebase:Rebase current branch + descendants onto new base'
-        'continue:Resume a cascade after resolving a conflict'
         'branch:Create or adopt a child branch with a worktree'
         'attach:Attach current branch to tree'
         'detach:Remove a branch from tree'
@@ -2176,11 +2260,6 @@ _git-tree() {
                 '--no-auto-rerere[Disable auto-continue via rerere]' \
                 '(-y --yes)'{-y,--yes}'[Skip the confirmation prompt]' \
                 ':target:__git_heads'
-            ;;
-        continue)
-            _arguments \
-                '--no-auto-rerere[Disable auto-continue via rerere]' \
-                ':origin:__git_heads'
             ;;
         branch)
             _arguments \
@@ -2236,7 +2315,7 @@ _git_tree() {
     local cur prev subcmds
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    subcmds="propagate rebase continue branch attach detach remove"
+    subcmds="propagate rebase branch attach detach remove"
     subcmds="$subcmds rebuild split push log completions manpage"
 
     if [[ $COMP_CWORD -eq 1 ]]; then
@@ -2259,14 +2338,6 @@ _git_tree() {
         rebase)
             if [[ "$cur" == -* ]]; then
                 COMPREPLY=($(compgen -W "--dry-run --no-auto-rerere -y --yes" -- "$cur"))
-            else
-                local branches=$(git for-each-ref --format='%(refname:short)' refs/heads/)
-                COMPREPLY=($(compgen -W "$branches" -- "$cur"))
-            fi
-            ;;
-        continue)
-            if [[ "$cur" == -* ]]; then
-                COMPREPLY=($(compgen -W "--no-auto-rerere" -- "$cur"))
             else
                 local branches=$(git for-each-ref --format='%(refname:short)' refs/heads/)
                 COMPREPLY=($(compgen -W "$branches" -- "$cur"))
@@ -2405,10 +2476,9 @@ FOR AGENTS:
   -y, --yes          skip confirmation on propagate/rebase/push/remove/rebuild/detach;
                      under --json a needed confirm returns kind=confirmation_required
                      (re-run with -y; never auto-confirmed)
-  git tree continue <origin>
-                     resume a cascade after resolving a conflict: finish the rebase (editor
-                     disabled), record the new fork point, resume from <origin> (the branch
-                     the cascade began at) and its descendants
+  resume a conflict  resolve the files, `git add`, then re-run `git tree propagate <branch>`
+                     (the branch you were operating on); it finishes the interrupted rebase
+                     (editor disabled) and continues the cascade — no `git rebase --continue`
   --no-input         never prompt; error instead of asking for a value
   --dry-run          preview propagate/rebase/push/remove without mutating
   --version          print git-tree <version>
@@ -2517,14 +2587,6 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     rebase_p.add_argument("-y", "--yes", action="store_true", help="Skip the confirmation prompt")
 
-    continue_p = sub.add_parser(
-        "continue", help="Resume a cascade after resolving a conflict", parents=[common]
-    )
-    continue_p.add_argument("origin", help="The branch the cascade was started from")
-    continue_p.add_argument(
-        "--no-auto-rerere", action="store_true", help="Disable auto-continue via rerere"
-    )
-
     branch_p = sub.add_parser(
         "branch", help="Create or adopt a child branch with a worktree", parents=[common]
     )
@@ -2623,7 +2685,6 @@ def main(argv: list[str] | None = None) -> None:  # explicit argv for tests
         None: cmd_tree,
         "propagate": cmd_propagate,
         "rebase": cmd_rebase,
-        "continue": cmd_continue,
         "branch": cmd_branch,
         "attach": cmd_attach,
         "detach": cmd_detach,
