@@ -10,6 +10,7 @@ import os
 import shutil
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import StrEnum
 from importlib import metadata
@@ -291,13 +292,29 @@ def _register_child(child: str, parent: str, *, fork: str | None = None) -> None
 
 
 @dataclass
+class BranchSnapshot:
+    """A read-only, concurrently-gathered snapshot of one worktree's state, produced by
+    `_hydrate` for the display/JSON paths so the per-worktree git calls overlap."""
+
+    status: WorktreeStatus
+    ahead_behind: tuple[int, int] | None
+    pending: int
+    rebase_in_progress: bool
+
+
+@dataclass
 class BranchInfo:
     name: str
     worktree: Path | None = None
     fork_commit: str | None = None
+    # None until `_hydrate` fills it (display/JSON only). Mutation paths never hydrate, so
+    # they always compute live and never read a stale snapshot.
+    snapshot: BranchSnapshot | None = None
 
     @property
     def is_dirty(self) -> bool:
+        if self.snapshot is not None:
+            return self.snapshot.status.dirty
         return self.worktree is not None and _worktree_status(self.worktree).dirty
 
 
@@ -580,7 +597,8 @@ def _git_status_summary(branch: str, info: BranchInfo, remote: str | None) -> st
 
     parts: list[str] = []
 
-    status = _worktree_status(worktree)
+    snap = info.snapshot
+    status = snap.status if snap else _worktree_status(worktree)
     if status.conflicted:
         parts.append(_color(f"✘{status.conflicted}", Color.RED))
     if status.staged:
@@ -590,7 +608,7 @@ def _git_status_summary(branch: str, info: BranchInfo, remote: str | None) -> st
     if status.untracked:
         parts.append(_color(f"?{status.untracked}", Color.RED))
 
-    ab = _ahead_behind(branch, remote, worktree)
+    ab = snap.ahead_behind if snap else _ahead_behind(branch, remote, worktree)
     if ab:
         ahead, behind = ab
         if ahead:
@@ -610,6 +628,8 @@ def _pending_commit_count(parent: str, child: str, info: BranchInfo | None = Non
     the number matches what propagate would actually replay; merge-base would
     over-count once parent and child have drifted.
     """
+    if info is not None and info.snapshot is not None:
+        return info.snapshot.pending
     base = _get_fork_commit(child, parent, info)
     if not base:
         return 0
@@ -831,16 +851,19 @@ def _tree_json(graph: Graph) -> dict:
             "pending_from_parent": _pending_commit_count(parent, name, info) if parent else None,
         }
         if worktree:
-            st = _worktree_status(worktree)
+            snap = info.snapshot if info else None
+            st = snap.status if snap else _worktree_status(worktree)
             entry.update(
                 dirty=st.dirty,
                 staged=st.staged,
                 modified=st.modified,
                 untracked=st.untracked,
                 conflicted=st.conflicted,
-                rebase_in_progress=_has_active_rebase(worktree),
+                rebase_in_progress=(
+                    snap.rebase_in_progress if snap else _has_active_rebase(worktree)
+                ),
             )
-            ab = _ahead_behind(name, remote, worktree)
+            ab = snap.ahead_behind if snap else _ahead_behind(name, remote, worktree)
             if ab:
                 entry["ahead"], entry["behind"] = ab
         if name in orphan_parent:
@@ -857,9 +880,41 @@ def _tree_json(graph: Graph) -> dict:
     }
 
 
+def _hydrate(graph: Graph, branches: list[str]) -> None:
+    """Concurrently snapshot each branch's worktree state onto its BranchInfo.
+
+    Read-only: the display and --json paths call this so the per-worktree git calls
+    (`status`, ahead/behind, pending-count, rebase check) overlap instead of running
+    serially — the dominant cost on slow/networked filesystems, where each `git status`
+    is a working-tree walk of stat round-trips. Branches without a worktree are skipped.
+    Threads are correct here: every call blocks in `subprocess`, releasing the GIL.
+    """
+    targets = [
+        info for b in branches if (info := graph.branches.get(b)) and info.worktree is not None
+    ]
+    if not targets:
+        return
+
+    def snapshot(info: BranchInfo) -> None:
+        wt = info.worktree
+        assert wt is not None  # filtered above
+        parent = graph.parent_of.get(info.name)
+        _, remote = _root_remote(graph, info.name)
+        info.snapshot = BranchSnapshot(
+            status=_worktree_status(wt),
+            ahead_behind=_ahead_behind(info.name, remote, wt),
+            pending=_pending_commit_count(parent, info.name, info) if parent else 0,
+            rebase_in_progress=_has_active_rebase(wt),
+        )
+
+    with ThreadPoolExecutor(max_workers=min(len(targets), 32)) as ex:
+        list(ex.map(snapshot, targets))
+
+
 def cmd_tree(args: argparse.Namespace) -> dict | None:
     graph = discover()
     if getattr(args, "json", False):
+        _hydrate(graph, list(graph.branches))
         # Always the full forest, regardless of current branch or --all: an agent querying
         # state usually isn't "on" a tree branch, and JSON has no clutter cost. Returned (not
         # printed) so main() wraps it in the envelope and writes it to the real stdout.
@@ -879,6 +934,8 @@ def cmd_tree(args: argparse.Namespace) -> dict | None:
         to_show = []
 
     if to_show:
+        rendered = [b for r in to_show for b in (r, *graph.downstream_from(r))]
+        _hydrate(graph, rendered)
         blocks = [format_tree(graph, root=r, current=current, show_counts=True) for r in to_show]
         print("\n\n".join(blocks))
     elif not all_roots:
