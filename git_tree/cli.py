@@ -460,6 +460,31 @@ def _find_cycles(graph: Graph) -> list[list[str]]:
     return cycles
 
 
+def _all_branch_config() -> dict[str, dict[str, str]]:
+    """Every `branch.<name>.<var>` from one `git config --list` read, as {branch: {var: value}}.
+
+    Replaces discover()'s per-branch `git config` lookups (one per local branch, plus one per
+    tree-branch) with a single subprocess. Keys are `branch.<subsection>.<var>`; the subsection
+    is a branch name that may itself contain dots (e.g. `granite-4.2`), so split on the LAST dot
+    for the variable and keep everything before it as the name. `-z` NUL-delimits records and
+    newline-separates each key from its value, so a value containing `=` stays unambiguous.
+    """
+    raw = git("config", "--list", "-z", check=False)
+    result: dict[str, dict[str, str]] = {}
+    for record in raw.split("\0"):
+        if not record.startswith("branch."):
+            continue
+        key, _, value = record.partition("\n")
+        # Branch names may contain dots (e.g. `granite-4.2`), so split on the LAST dot:
+        # the variable is the final segment, the branch name is everything before it.
+        # Unambiguous only because our tree variable names contain no dot.
+        name, sep, var = key[len("branch.") :].rpartition(".")
+        if not sep:  # a top-level `branch.<var>` setting with no branch subsection
+            continue
+        result.setdefault(name, {})[var] = value
+    return result
+
+
 def discover() -> Graph:
     graph = Graph()
 
@@ -511,10 +536,12 @@ def discover() -> Graph:
 
     all_branches = all_branch_names()
     all_branches_set = set(all_branches)
+    branch_config = _all_branch_config()
 
     orphaned: list[tuple[str, str]] = []
     for branch in all_branches:
-        parent = _get_tree_parent(branch)
+        bc = branch_config.get(branch, {})
+        parent = bc.get("tree-parent-branch", "")
         if not parent:
             continue
 
@@ -522,7 +549,7 @@ def discover() -> Graph:
             orphaned.append((branch, parent))
             continue
 
-        fork_commit = git("config", f"branch.{branch}.tree-fork-commit", check=False) or None
+        fork_commit = bc.get("tree-fork-commit") or None
         info = BranchInfo(
             name=branch,
             worktree=worktree_map.get(branch),
