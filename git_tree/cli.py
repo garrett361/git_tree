@@ -529,14 +529,8 @@ def discover() -> Graph:
 
     # Recover branch names for detached worktrees (mid-rebase)
     for wt_path in detached_worktrees:
-        git_dir_path = _git_dir(wt_path)
-        head_name_file = git_dir_path / "rebase-merge" / "head-name"
-        if not head_name_file.exists():
-            head_name_file = git_dir_path / "rebase-apply" / "head-name"
-        if head_name_file.exists():
-            ref = head_name_file.read_text().strip()
-            if ref.startswith("refs/heads/"):
-                worktree_map[ref.removeprefix("refs/heads/")] = wt_path
+        if name := _active_rebase_branch(wt_path):
+            worktree_map[name] = wt_path
 
     graph.worktree_of = worktree_map
 
@@ -1530,31 +1524,31 @@ def _has_active_rebase(cwd: Path) -> bool:
     return (git_dir_path / "rebase-merge").is_dir() or (git_dir_path / "rebase-apply").is_dir()
 
 
-def _active_rebase_onto(cwd: Path) -> str | None:
-    """The commit the in-progress rebase in `cwd` is replaying onto, read from git's own
-    `rebase-merge/onto` (merge backend) or `rebase-apply/onto` (legacy `am` backend); None
-    if no active rebase or the file is absent. Used to tell git-tree's own cascade rebase
-    (onto == a branch's tree-parent) from an unrelated hand-started one, and to record the
-    fork at the exact base that was replayed."""
+def _rebase_state_file(cwd: Path, name: str) -> str | None:
+    """Read git's in-progress-rebase state file `<backend>/<name>`, trying the merge backend
+    (`rebase-merge/`) first, then the legacy `am` backend (`rebase-apply/`). Returns the stripped
+    contents, or None if no rebase is in progress, the file is absent, or it is empty."""
     git_dir_path = _git_dir(cwd)
     for backend in ("rebase-merge", "rebase-apply"):
-        onto_file = git_dir_path / backend / "onto"
-        if onto_file.exists():
-            sha = onto_file.read_text().strip()
-            return sha or None
+        state_file = git_dir_path / backend / name
+        if state_file.exists():
+            return state_file.read_text().strip() or None
     return None
 
 
+def _active_rebase_onto(cwd: Path) -> str | None:
+    """The commit the in-progress rebase in `cwd` is replaying onto (git's `onto` state file); None
+    if no active rebase. Used to tell git-tree's own cascade rebase (onto == a branch's tree-parent)
+    from an unrelated hand-started one, and to record the fork at the base actually replayed."""
+    return _rebase_state_file(cwd, "onto")
+
+
 def _active_rebase_branch(cwd: Path) -> str | None:
-    """The branch being rebased by the in-progress rebase in `cwd`, from `rebase-merge/head-name`
-    (or `rebase-apply/head-name`); None if absent or not a `refs/heads/` ref."""
-    git_dir_path = _git_dir(cwd)
-    for backend in ("rebase-merge", "rebase-apply"):
-        head_name = git_dir_path / backend / "head-name"
-        if head_name.exists():
-            ref = head_name.read_text().strip()
-            if ref.startswith("refs/heads/"):
-                return ref.removeprefix("refs/heads/")
+    """The branch being rebased by the in-progress rebase in `cwd` (git's `head-name` state file);
+    None if absent or not a `refs/heads/` ref."""
+    ref = _rebase_state_file(cwd, "head-name")
+    if ref and ref.startswith("refs/heads/"):
+        return ref.removeprefix("refs/heads/")
     return None
 
 
