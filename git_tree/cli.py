@@ -2573,9 +2573,10 @@ def _render_completions(parser: argparse.ArgumentParser, shell: str) -> str:
     return _render_zsh(parser) if shell == "zsh" else _render_bash(parser)
 
 
-def _completes(action: argparse.Action, tag: str) -> None:
+def _set_completer(action: argparse.Action, tag: str) -> None:
     """Tag a value arg with its shell completer (`git_heads`/`directories`), read back via getattr
-    in the completion generator. Stored in __dict__ so it stays a plain dynamic attribute."""
+    in the completion generator. Written through __dict__ so `ty` does not flag it as an unknown
+    attribute on argparse.Action."""
     action.__dict__["completer"] = tag
 
 
@@ -2672,7 +2673,7 @@ _KIND_BY_CODE = {2: "usage", 3: "conflict", 4: "precondition", 5: "not_a_tree_br
 
 
 def _envelope(args: argparse.Namespace, data: dict | None = None) -> dict:
-    env = {"command": getattr(args, "command", None) or "tree", "ok": True}
+    env = {"command": args.command or "tree", "ok": True}
     if data:
         env.update(data)  # flat merge: e.g. cmd_tree's forest keys become siblings
     return env
@@ -2701,7 +2702,7 @@ def _error_envelope(args: argparse.Namespace, err: TreeError) -> dict:
 def _render_error(args: argparse.Namespace, err: TreeError, out) -> NoReturn:
     # The human message is already on stderr (TreeError.__init__). In agent mode, also write
     # the structured envelope to the real stdout so the agent gets exactly one JSON object.
-    if getattr(args, "json", False):
+    if args.json:
         print(json.dumps(_error_envelope(args, err), indent=2), file=out)
     raise SystemExit(err.code)
 
@@ -2711,8 +2712,8 @@ def _build_parser() -> argparse.ArgumentParser:
     dispatches on it (via each subparser's set_defaults(func=...)), and `_render_manpage`, `-h`,
     and `_render_completions` (both shells) all derive from it. A subcommand added here is wired
     for dispatch, help, the man page, and completions by that one `add_parser` block; a value arg
-    that should complete branches or paths carries a `_completes(..., "git_heads"/"directories")`
-    tag."""
+    that should complete branches or paths is tagged via `_set_completer(..., "git_heads")` (or
+    `"directories"`)."""
     parser = argparse.ArgumentParser(
         prog="git-tree",
         description=__doc__,
@@ -2750,7 +2751,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "propagate", help="Propagate changes to all descendants", parents=[common]
     )
     propagate_p.set_defaults(func=cmd_propagate)
-    _completes(
+    _set_completer(
         propagate_p.add_argument(
             "branch", nargs="?", help="Branch to propagate from (default: current)"
         ),
@@ -2768,7 +2769,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "rebase", help="Rebase current branch + descendants onto new base", parents=[common]
     )
     rebase_p.set_defaults(func=cmd_rebase)
-    _completes(rebase_p.add_argument("target", help="Branch or ref to rebase onto"), "git_heads")
+    _set_completer(
+        rebase_p.add_argument("target", help="Branch or ref to rebase onto"), "git_heads"
+    )
     rebase_p.add_argument("--dry-run", action="store_true", help="Show what would be done")
     rebase_p.add_argument(
         "--no-auto-rerere", action="store_true", help="Disable auto-continue via rerere"
@@ -2779,7 +2782,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "branch", help="Create or adopt a child branch with a worktree", parents=[common]
     )
     branch_p.set_defaults(func=cmd_branch)
-    _completes(branch_p.add_argument("path", help="Worktree path for the branch"), "directories")
+    _set_completer(
+        branch_p.add_argument("path", help="Worktree path for the branch"), "directories"
+    )
     branch_p.add_argument("name", help="Branch name (new, or an existing branch to adopt)")
     branch_p.add_argument(
         "--no-submodule-init",
@@ -2789,14 +2794,14 @@ def _build_parser() -> argparse.ArgumentParser:
 
     attach_p = sub.add_parser("attach", help="Attach current branch to tree", parents=[common])
     attach_p.set_defaults(func=cmd_attach)
-    _completes(
+    _set_completer(
         attach_p.add_argument("parent", nargs="?", help="Parent branch (fzf if omitted)"),
         "git_heads",
     )
 
     detach_p = sub.add_parser("detach", help="Remove a branch from tree", parents=[common])
     detach_p.set_defaults(func=cmd_detach)
-    _completes(
+    _set_completer(
         detach_p.add_argument("branch", nargs="?", help="Branch to detach (default: current)"),
         "git_heads",
     )
@@ -2808,7 +2813,7 @@ def _build_parser() -> argparse.ArgumentParser:
         parents=[common],
     )
     remove_p.set_defaults(func=cmd_remove)
-    _completes(
+    _set_completer(
         remove_p.add_argument("branch", nargs="?", help="Branch to remove (default: pick via fzf)"),
         "git_heads",
     )
@@ -2826,7 +2831,7 @@ def _build_parser() -> argparse.ArgumentParser:
         parents=[common],
     )
     rebuild_p.set_defaults(func=cmd_rebuild)
-    _completes(
+    _set_completer(
         rebuild_p.add_argument(
             "branch", nargs="?", help="Branch to rebuild (default: pick via fzf)"
         ),
@@ -2841,7 +2846,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "split", help="Split current branch into parent + child", parents=[common]
     )
     split_p.set_defaults(func=cmd_split)
-    _completes(
+    _set_completer(
         split_p.add_argument(
             "--after", metavar="COMMIT", help="Commit to split after (fzf if omitted)"
         ),
@@ -2854,7 +2859,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Keep the current branch for the early commits; new branch takes the rest",
     )
     split_wt = split_p.add_mutually_exclusive_group()
-    _completes(
+    _set_completer(
         split_wt.add_argument(
             "--worktree", metavar="PATH", help="Create the new branch's worktree at PATH"
         ),
@@ -2890,7 +2895,7 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Write the man page under the man path instead of printing to stdout",
     )
-    _completes(
+    _set_completer(
         manpage_p.add_argument(
             "--dir",
             metavar="DIR",
@@ -2904,15 +2909,15 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> None:  # explicit argv for tests
     parser = _build_parser()
     args, unknown = parser.parse_known_args(argv)
-    if unknown and getattr(args, "command", None) != "log":
+    if unknown and args.command != "log":
         parser.error(f"unrecognized arguments: {' '.join(unknown)}")
-    if getattr(args, "command", None) == "log":
+    if args.command == "log":
         args.extra = unknown
 
     # Single output edge. In agent mode all inline human/`git_echo` output is redirected to
     # stderr (a stdlib context manager, restored on exit) so stdout carries exactly one JSON
-    # object, written after the handler returns. Errors render here too — one place.
-    agent = getattr(args, "json", False)
+    # object, written after the handler returns. Errors render here too, in one place.
+    agent = args.json
     real_stdout = sys.stdout
     try:
         if args.command == "manpage":
@@ -2927,7 +2932,7 @@ def main(argv: list[str] | None = None) -> None:  # explicit argv for tests
         else:
             # manpage/completions are handled above (pre-dispatch); every other subparser sets
             # func, and the top-level default covers the no-subcommand case.
-            handler = getattr(args, "func", cmd_tree)
+            handler = args.func
             with contextlib.redirect_stdout(sys.stderr) if agent else contextlib.nullcontext():
                 # Only cmd_tree returns envelope data (the forest); others return None.
                 data = handler(args)

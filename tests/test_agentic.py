@@ -325,10 +325,13 @@ class TestCompletionGeneration:
                 assert flag not in script, f"{shell} should not list {flag}"
 
     def test_zsh_escapes_apostrophes_in_descriptions(self) -> None:
-        # `remove`'s help contains an ASCII apostrophe; inside the single-quoted _describe entry it
-        # must be escaped ('\''), or a bare ' would truncate the spec (and quietly drop later ones).
+        # `remove`'s and split's help contain ASCII apostrophes; inside a single-quoted _describe
+        # or option spec they must be escaped ('\''), or a bare ' truncates the spec (and quietly
+        # drops later ones; split has two, so the quote count rebalances and `zsh -n` still passes).
         zsh = _render_completions(_build_parser(), "zsh")
-        assert "subtree'\\''s worktrees" in zsh
+        assert "subtree'\\''s worktrees" in zsh  # remove subcommand description
+        assert "new branch'\\''s worktree" in zsh  # split --worktree option description
+        assert "Don'\\''t create a worktree" in zsh  # split --no-worktree option description
 
     def test_argless_subcommand_gets_no_arm(self) -> None:
         # `log` has only universal flags, so like the old hand-written script it needs no case arm.

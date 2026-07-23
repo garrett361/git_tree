@@ -58,7 +58,7 @@ Fast inner loop: test files map 1:1 to commands (`test_rebase.py`, `test_push.py
 A command touches two sites:
 
 1. The `cmd_<name>(args)` handler.
-2. `sub.add_parser(...)` in `_build_parser()`, with `.set_defaults(func=cmd_<name>)`. The parser is the single source of truth: that one block wires dispatch (`main()` calls `args.func`), `-h`, the man page (`_render_manpage`), and both shell completions (`_render_completions`). If a value arg should complete branches or paths, tag it with `_completes(parser.add_argument(...), "git_heads"/"directories")`.
+2. `sub.add_parser(...)` in `_build_parser()`, with `.set_defaults(func=cmd_<name>)`. The parser is the single source of truth: that one block wires dispatch (`main()` calls `args.func`), `-h`, the man page (`_render_manpage`), and both shell completions (`_render_completions`). If a value arg should complete branches or paths, tag it with `_set_completer(parser.add_argument(...), "git_heads"/"directories")`.
 
 Commands that emit non-envelope output (`manpage`, `completions`) or have no JSON form (`log`) are special-cased in `main()` before the `args.func` dispatch; `manpage`/`completions` therefore set no `func` (and `cmd_manpage` takes the parser, so it could not be dispatched generically anyway). Completions are generated from the parser, so they cannot drift; `tests/test_agentic.py::TestCompletionGeneration` asserts the generated scripts complete the right tokens per subcommand and parse under the real shells.
 
@@ -104,7 +104,7 @@ Single module: `git_tree/cli.py`. All commands, git helpers, graph discovery, an
 
 Real git operations against isolated repos (no mocking). The `repo` fixture (`tests/conftest.py`) creates a bare origin + clone in `tmp_path` and `chdir`s into it. `RepoHelper` provides `commit()`, `branch()`, `checkout()`, `set_parent()`, `worktree()`, `push()`.
 
-To call a `cmd_*` handler directly, build its args with `cli_args(**overrides)` (`tests/conftest.py`), which returns a **complete** namespace (every flag at its parser default, derived by walking `_build_parser()`). Do not hand-build `argparse.Namespace(...)` with only the fields a test cares about: partial namespaces are what forced production handlers to read args defensively via `getattr`. Handlers read `args.<flag>` directly, so a missing field is a bug in the fixture, not something the code should tolerate.
+To call a `cmd_*` handler directly, build its args with `cli_args(**overrides)` (`tests/conftest.py`), which returns a **complete** namespace (every flag at its parser default, derived by walking `_build_parser()`). Handlers read `args.<flag>` directly (no `getattr` defaults), so a missing field raises `AttributeError`: a partial hand-built `argparse.Namespace(...)` is a fixture bug, not something production code should tolerate. Always go through `cli_args`.
 
 ## Conventions
 
