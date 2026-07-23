@@ -2740,6 +2740,9 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Never prompt; error (exit 4) if a value would be asked for interactively",
     )
     parser.add_argument("--version", action="version", version=f"git-tree {_version()}")
+    # Handler dispatch lives on the parser: the no-subcommand default is cmd_tree, and each
+    # dispatchable subparser overrides it via set_defaults(func=...) below. main() calls args.func.
+    parser.set_defaults(func=cmd_tree)
     # --no-input is accepted both before the subcommand (top-level, above) and after it
     # (via this shared parent). SUPPRESS on the parent copy means an absent flag leaves the
     # top-level value intact instead of clobbering it with the subparser's default.
@@ -2751,6 +2754,7 @@ def _build_parser() -> argparse.ArgumentParser:
     propagate_p = sub.add_parser(
         "propagate", help="Propagate changes to all descendants", parents=[common]
     )
+    propagate_p.set_defaults(func=cmd_propagate)
     propagate_p.add_argument(
         "branch", nargs="?", help="Branch to propagate from (default: current)"
     )
@@ -2765,6 +2769,7 @@ def _build_parser() -> argparse.ArgumentParser:
     rebase_p = sub.add_parser(
         "rebase", help="Rebase current branch + descendants onto new base", parents=[common]
     )
+    rebase_p.set_defaults(func=cmd_rebase)
     rebase_p.add_argument("target", help="Branch or ref to rebase onto")
     rebase_p.add_argument("--dry-run", action="store_true", help="Show what would be done")
     rebase_p.add_argument(
@@ -2775,6 +2780,7 @@ def _build_parser() -> argparse.ArgumentParser:
     branch_p = sub.add_parser(
         "branch", help="Create or adopt a child branch with a worktree", parents=[common]
     )
+    branch_p.set_defaults(func=cmd_branch)
     branch_p.add_argument("path", help="Worktree path for the branch")
     branch_p.add_argument("name", help="Branch name (new, or an existing branch to adopt)")
     branch_p.add_argument(
@@ -2784,9 +2790,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     attach_p = sub.add_parser("attach", help="Attach current branch to tree", parents=[common])
+    attach_p.set_defaults(func=cmd_attach)
     attach_p.add_argument("parent", nargs="?", help="Parent branch (fzf if omitted)")
 
     detach_p = sub.add_parser("detach", help="Remove a branch from tree", parents=[common])
+    detach_p.set_defaults(func=cmd_detach)
     detach_p.add_argument("branch", nargs="?", help="Branch to detach (default: current)")
     detach_p.add_argument("-y", "--yes", action="store_true", help="Skip the confirmation prompt")
 
@@ -2795,6 +2803,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Remove a subtree's worktrees and unregister its branches (keeps refs)",
         parents=[common],
     )
+    remove_p.set_defaults(func=cmd_remove)
     remove_p.add_argument("branch", nargs="?", help="Branch to remove (default: pick via fzf)")
     remove_p.add_argument("--dry-run", action="store_true", help="Show what would be done")
     remove_p.add_argument("-y", "--yes", action="store_true", help="Skip the confirmation prompt")
@@ -2809,6 +2818,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Rebuild a corrupted worktree from the branch tip (keeps branch ref and tree config)",
         parents=[common],
     )
+    rebuild_p.set_defaults(func=cmd_rebuild)
     rebuild_p.add_argument("branch", nargs="?", help="Branch to rebuild (default: pick via fzf)")
     rebuild_p.add_argument(
         "--force", action="store_true", help="Proceed even if worktree has uncommitted changes"
@@ -2818,6 +2828,7 @@ def _build_parser() -> argparse.ArgumentParser:
     split_p = sub.add_parser(
         "split", help="Split current branch into parent + child", parents=[common]
     )
+    split_p.set_defaults(func=cmd_split)
     split_p.add_argument("--after", metavar="COMMIT", help="Commit to split after (fzf if omitted)")
     split_p.add_argument("--name", metavar="BRANCH", help="New branch name (prompt if omitted)")
     split_p.add_argument(
@@ -2837,10 +2848,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     push_p = sub.add_parser("push", help="Push current branch + descendants", parents=[common])
+    push_p.set_defaults(func=cmd_push)
     push_p.add_argument("--dry-run", action="store_true", help="Show what would be done")
     push_p.add_argument("-y", "--yes", action="store_true", help="Skip the confirmation prompt")
 
-    sub.add_parser("log", help="Show git log graph for all tree-branches", parents=[common])
+    log_p = sub.add_parser("log", help="Show git log graph for all tree-branches", parents=[common])
+    log_p.set_defaults(func=cmd_log)
 
     completions_p = sub.add_parser(
         "completions", help="Emit shell completion script", parents=[common]
@@ -2871,20 +2884,6 @@ def main(argv: list[str] | None = None) -> None:  # explicit argv for tests
     if getattr(args, "command", None) == "log":
         args.extra = unknown
 
-    commands = {
-        None: cmd_tree,
-        "propagate": cmd_propagate,
-        "rebase": cmd_rebase,
-        "branch": cmd_branch,
-        "attach": cmd_attach,
-        "detach": cmd_detach,
-        "remove": cmd_remove,
-        "rebuild": cmd_rebuild,
-        "split": cmd_split,
-        "push": cmd_push,
-        "log": cmd_log,
-    }
-
     # Single output edge. In agent mode all inline human/`git_echo` output is redirected to
     # stderr (a stdlib context manager, restored on exit) so stdout carries exactly one JSON
     # object, written after the handler returns. Errors render here too — one place.
@@ -2901,7 +2900,9 @@ def main(argv: list[str] | None = None) -> None:  # explicit argv for tests
                 "`git tree log` has no JSON form; query state with `git tree --json`.", code=2
             )
         else:
-            handler = commands.get(args.command, cmd_tree)
+            # manpage/completions are handled above (pre-dispatch); every other subparser sets
+            # func, and the top-level default covers the no-subcommand case.
+            handler = getattr(args, "func", cmd_tree)
             with contextlib.redirect_stdout(sys.stderr) if agent else contextlib.nullcontext():
                 # Only cmd_tree returns envelope data (the forest); others return None.
                 data = handler(args)
