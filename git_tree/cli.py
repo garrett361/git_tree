@@ -736,12 +736,6 @@ def _subtree_lines(graph: Graph, root: str, *, show_counts: bool = False) -> lis
     return format_tree(graph, root=root, show_counts=show_counts).splitlines()[1:]
 
 
-def _print_results(results: list[tuple[str, str]]) -> None:
-    print("Results:")
-    for name, status in results:
-        print(f"  {name}: {status}")
-
-
 # ---------------------------------------------------------------------------
 # Confirmation
 # ---------------------------------------------------------------------------
@@ -1824,6 +1818,17 @@ def _advance_branch(
     return RebaseResult("resumed", pop_conflicted=False)
 
 
+def _resume_cmd(branch: str) -> list[str]:
+    """The argv that resumes a stalled cascade: always `git tree propagate <branch>`. A fresh list
+    per call, since callers surface it as a mutable `remedy`."""
+    return ["git", "tree", "propagate", branch]
+
+
+def _auto_rerere(args: argparse.Namespace) -> bool:
+    """Whether to auto-continue rebases via rerere (on unless `--no-auto-rerere`)."""
+    return not args.no_auto_rerere
+
+
 def _propagate_descendants(
     branch: str,
     graph: Graph,
@@ -1833,7 +1838,7 @@ def _propagate_descendants(
 ) -> list[tuple[str, str]]:
     # `resume_cmd` is the command that resumes this cascade if a descendant conflicts (defaults
     # to `git tree propagate <branch>`); surfaced in the conflict hint.
-    resume_cmd = resume_cmd or ["git", "tree", "propagate", branch]
+    resume_cmd = resume_cmd or _resume_cmd(branch)
     descendants = graph.downstream_from(branch)
     results: list[tuple[str, str]] = []
 
@@ -1860,7 +1865,7 @@ def cmd_propagate(args: argparse.Namespace) -> None:
     graph = discover()
 
     descendants = graph.downstream_from(branch)
-    resume_cmd = ["git", "tree", "propagate", branch]
+    resume_cmd = _resume_cmd(branch)
 
     # `propagate` is also the universal resume: if a conflict stopped an earlier cascade, the
     # user resolves + `git add` and re-runs this command, which finishes the interrupted rebase
@@ -1893,7 +1898,7 @@ def cmd_propagate(args: argparse.Namespace) -> None:
     # agent `remedy` runnable without -y). Only a fresh propagate asks.
     if not is_resume and not _proceed(args, "Proceed?"):
         return
-    auto_rerere = not getattr(args, "no_auto_rerere", False)
+    auto_rerere = _auto_rerere(args)
 
     print()
     if named_mid:
@@ -1936,7 +1941,7 @@ def cmd_rebase(args: argparse.Namespace) -> None:
         raise
     target: str = args.target
     graph = discover()
-    resume_cmd = ["git", "tree", "propagate", branch]
+    resume_cmd = _resume_cmd(branch)
 
     old_parent = graph.parent_of.get(branch) or _get_tree_parent(branch)
     if not old_parent:
@@ -2000,7 +2005,7 @@ def cmd_rebase(args: argparse.Namespace) -> None:
     if args.dry_run or not _proceed(args, "Proceed?"):
         return
 
-    auto_rerere = not getattr(args, "no_auto_rerere", False)
+    auto_rerere = _auto_rerere(args)
 
     # Reparent + carry the remote BEFORE the rebase so a conflict leaves config pointing at
     # the intended new parent. That makes a conflict resumable the same way any propagate conflict
@@ -2327,7 +2332,9 @@ def cmd_push(args: argparse.Namespace) -> dict | None:
             results.append((b, "FAILED"))
 
     print()
-    _print_results(results)
+    print("Results:")
+    for name, status in results:
+        print(f"  {name}: {status}")
 
     if failed:
         # A push that fails must not exit 0 (latent bug). A lease rejection means the remote
