@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import argparse
-
 from git_tree.cli import (
     BranchInfo,
     _git_status_summary,
@@ -12,12 +10,12 @@ from git_tree.cli import (
     main,
 )
 
-from .conftest import RepoHelper
+from .conftest import RepoHelper, cli_args
 
 
 class TestFormatTree:
     def test_empty_repo_prints_registration_hint(self, repo: RepoHelper, capsys) -> None:
-        cmd_tree(argparse.Namespace())
+        cmd_tree(cli_args())
         out = capsys.readouterr().out
         assert "no tree-branches registered" in out
 
@@ -68,7 +66,7 @@ class TestCmdTreeForest:
         repo.git("branch", "standalone")  # real branch, not registered in the tree
         repo.branch("leaf", parent="standalone")
 
-        cmd_tree(argparse.Namespace(all=True))
+        cmd_tree(cli_args(all=True))
         out = capsys.readouterr().out
 
         assert "topic" in out
@@ -83,7 +81,7 @@ class TestCmdTreeForest:
         repo.branch("leaf", parent="standalone")  # standalone's tree
         repo.checkout("leaf")
 
-        cmd_tree(argparse.Namespace())
+        cmd_tree(cli_args())
         out = capsys.readouterr().out
 
         assert "standalone" in out
@@ -96,7 +94,7 @@ class TestCmdTreeForest:
         repo.branch("leaf", parent="standalone")
         repo.checkout("main")  # main has no tree-parent and no children -> not a tree-branch
 
-        cmd_tree(argparse.Namespace())
+        cmd_tree(cli_args())
         out = capsys.readouterr().out
 
         assert "Not on a tree-branch" in out
@@ -175,7 +173,7 @@ class TestStatusRemote:
         repo.git("add", "c2.txt", cwd=wt)
         repo.git("commit", "-m", "c2", cwd=wt)  # 1 ahead of upstream/child
 
-        cmd_tree(argparse.Namespace())
+        cmd_tree(cli_args())
         out = capsys.readouterr().out
         assert "⇡1" in out  # ahead computed against upstream/child, not origin
 
@@ -188,7 +186,7 @@ class TestStatusRemote:
         repo.git("add", "c1.txt", cwd=wt)
         repo.git("commit", "-m", "c1", cwd=wt)
 
-        cmd_tree(argparse.Namespace())
+        cmd_tree(cli_args())
         out = capsys.readouterr().out
         assert "child" in out
         assert "⇡" not in out

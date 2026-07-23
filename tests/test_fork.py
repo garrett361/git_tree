@@ -12,8 +12,6 @@ off the child's true fork and the old code replays the wrong range.
 
 from __future__ import annotations
 
-import argparse
-
 import pytest
 
 from git_tree.cli import (
@@ -26,13 +24,13 @@ from git_tree.cli import (
     discover,
 )
 
-from .conftest import RepoHelper
+from .conftest import RepoHelper, cli_args
 
 
 def _ns(
     *, dry_run: bool = False, no_auto_rerere: bool = False, branch: str | None = None
 ) -> object:
-    return argparse.Namespace(dry_run=dry_run, no_auto_rerere=no_auto_rerere, branch=branch)
+    return cli_args(dry_run=dry_run, no_auto_rerere=no_auto_rerere, branch=branch)
 
 
 def _commit_in(repo: RepoHelper, wt, filename: str, content: str, message: str) -> None:
@@ -111,7 +109,7 @@ class TestSplitAfterRewrite:
         inputs = iter(["E", "n"])
         monkeypatch.setattr("builtins.input", lambda _: next(inputs))
         monkeypatch.chdir(wt_a)
-        cmd_split(None)
+        cmd_split(cli_args(command="split"))
 
         graph = discover()
         assert graph.parent_of["A"] == "E"
@@ -214,7 +212,7 @@ class TestCascadeModifiedMiddle:
 class TestForkCommitLifecycle:
     def test_set_on_branch(self, repo: RepoHelper, tmp_path) -> None:
         parent_tip = repo.git("rev-parse", "main")
-        cmd_branch(argparse.Namespace(name="feat", path=str(tmp_path / "wt-feat")))
+        cmd_branch(cli_args(command="branch", name="feat", path=str(tmp_path / "wt-feat")))
         assert repo.git("config", "branch.feat.tree-parent-branch") == "main"
         assert repo.git("config", "branch.feat.tree-fork-commit") == parent_tip
 
@@ -223,7 +221,7 @@ class TestForkCommitLifecycle:
         repo.checkout("feat")
         repo.commit("f.txt", "f", "on feat")
         expected = repo.git("merge-base", "main", "feat")
-        cmd_attach(argparse.Namespace(parent="main"))
+        cmd_attach(cli_args(command="attach", parent="main"))
         assert repo.git("config", "branch.feat.tree-fork-commit") == expected
 
     def test_set_on_split(self, repo: RepoHelper, monkeypatch) -> None:
@@ -239,7 +237,7 @@ class TestForkCommitLifecycle:
         monkeypatch.setattr("git_tree.cli.fzf_select", lambda items, **kw: [split_line])
         inputs = iter(["feat-base", "n"])
         monkeypatch.setattr("builtins.input", lambda _: next(inputs))
-        cmd_split(None)
+        cmd_split(cli_args(command="split"))
 
         # New parent inherits feat's old fork (where it forked from main);
         # feat now forks from the split boundary.

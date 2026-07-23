@@ -1,16 +1,14 @@
 from __future__ import annotations
 
-import argparse
-
 import pytest
 
 from git_tree.cli import TreeError, cmd_branch, discover
 
-from .conftest import RepoHelper, _git
+from .conftest import RepoHelper, _git, cli_args
 
 
 def _ns(command: str = "branch", **kwargs: str) -> object:
-    return argparse.Namespace(command=command, **kwargs)
+    return cli_args(command=command, **kwargs)
 
 
 class TestBranch:

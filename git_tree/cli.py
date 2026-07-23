@@ -758,7 +758,7 @@ def confirm(message: str) -> bool:
 def _no_input(args: argparse.Namespace) -> bool:
     """True if the tool must never prompt. `--json` (agent mode) implies this: an
     interactive prompt would deadlock an agent that isn't feeding stdin."""
-    return getattr(args, "no_input", False) or getattr(args, "json", False)
+    return args.no_input or args.json
 
 
 def _require_input(args: argparse.Namespace, what: str, flag: str) -> None:
@@ -769,7 +769,7 @@ def _require_input(args: argparse.Namespace, what: str, flag: str) -> None:
 
 def _proceed(args: argparse.Namespace, message: str) -> bool:
     """True if the user opted in via --yes or an interactive y/N confirmation."""
-    if getattr(args, "yes", False):
+    if args.yes:
         return True
     if _no_input(args):
         raise TreeError(
@@ -934,7 +934,7 @@ def _hydrate(graph: Graph, branches: list[str]) -> None:
 
 def cmd_tree(args: argparse.Namespace) -> dict | None:
     graph = discover()
-    if getattr(args, "json", False):
+    if args.json:
         _hydrate(graph, list(graph.branches))
         # Always the full forest, regardless of current branch or --all: an agent querying
         # state usually isn't "on" a tree branch, and JSON has no clutter cost. Returned (not
@@ -944,7 +944,7 @@ def cmd_tree(args: argparse.Namespace) -> dict | None:
     current = None if (not raw or raw == "HEAD") else raw
 
     all_roots = roots(graph)
-    if getattr(args, "all", False):
+    if args.all:
         # A root is a tree-branch with children but no tracked parent; show every one,
         # including stacks whose base isn't main (otherwise invisible).
         to_show = all_roots
@@ -976,7 +976,7 @@ def cmd_branch(args: argparse.Namespace) -> None:
             raise TreeError(f"failed to create worktree at {path}")
         git("config", f"branch.{name}.tree-parent-branch", parent)
         _set_fork_commit(name, git("rev-parse", parent))
-        if not getattr(args, "no_submodule_init", False):
+        if not args.no_submodule_init:
             _init_submodules_or_warn(path)
         print(f"Created branch {name} with worktree at {path} (parent: {parent})")
         return
@@ -999,7 +999,7 @@ def cmd_branch(args: argparse.Namespace) -> None:
     if not git_echo_ok("worktree", "add", path, name):
         raise TreeError(f"failed to create worktree at {path}")
     _register_child(name, parent, fork=base)
-    if not getattr(args, "no_submodule_init", False):
+    if not args.no_submodule_init:
         _init_submodules_or_warn(path)
     print(f"Adopted existing branch {name} with worktree at {path} (parent: {parent})")
 
@@ -1028,7 +1028,7 @@ def cmd_attach(args: argparse.Namespace) -> None:
 
 
 def cmd_detach(args: argparse.Namespace) -> None:
-    branch = getattr(args, "branch", None) or current_branch()
+    branch = args.branch or current_branch()
     parent = _get_tree_parent(branch)
     if not parent:
         raise TreeError(f"{branch} is not in the tree.", code=5)
@@ -1104,7 +1104,7 @@ def cmd_remove(args: argparse.Namespace) -> None:
     except TreeError:
         cur = None
 
-    target = getattr(args, "branch", None)
+    target = args.branch
     if target is None:
         _require_input(args, "branch to remove", "the branch argument")
         # No branch given: pick from removable tree-branches that have a worktree. The
@@ -1138,7 +1138,7 @@ def cmd_remove(args: argparse.Namespace) -> None:
             f"Switch to a branch outside the subtree first."
         )
 
-    force = getattr(args, "force", False)
+    force = args.force
 
     # cwd guard: force-removal deletes the directory outright (bypassing git's "can't delete the
     # tree you're standing in" protection), and a following `git worktree prune` from a deleted
@@ -1191,7 +1191,7 @@ def cmd_remove(args: argparse.Namespace) -> None:
         for b in dirty:
             print(f"  {b}  ({graph.branches[b].worktree})")
     print()
-    if getattr(args, "dry_run", False):
+    if args.dry_run:
         return
     if not _proceed(args, "Remove these worktrees and detach the branches?"):
         return
@@ -1254,7 +1254,7 @@ def cmd_rebuild(args: argparse.Namespace) -> None:
     """Rebuild a corrupted worktree from the branch tip, preserving branch ref and tree config."""
     graph = discover()
 
-    target = getattr(args, "branch", None)
+    target = args.branch
     if target is None:
         _require_input(args, "branch to rebuild", "the branch argument")
         candidates = sorted(
@@ -1306,7 +1306,7 @@ def cmd_rebuild(args: argparse.Namespace) -> None:
         pass  # cwd resolution failed; proceed anyway
 
     # Dirty check: if git status works and shows changes, require --force
-    force = getattr(args, "force", False)
+    force = args.force
     try:
         if info.is_dirty and not force:
             raise TreeError(
@@ -1861,7 +1861,7 @@ def _propagate_descendants(
 
 
 def cmd_propagate(args: argparse.Namespace) -> None:
-    branch = getattr(args, "branch", None) or current_branch()
+    branch = args.branch or current_branch()
     graph = discover()
 
     descendants = graph.downstream_from(branch)
@@ -1892,7 +1892,7 @@ def cmd_propagate(args: argparse.Namespace) -> None:
         print(line)
     print()
 
-    if getattr(args, "dry_run", False):
+    if args.dry_run:
         return
     # A resume continues an already-confirmed cascade — don't re-prompt (this also keeps the
     # agent `remedy` runnable without -y). Only a fresh propagate asks.
@@ -2051,10 +2051,10 @@ def _resolve_split_point(after: str, old_fork: str | None) -> str:
 def _worktree_choice(args: argparse.Namespace, name: str) -> str:
     """Worktree path for the new branch, or "" for none: `--worktree PATH` / `--no-worktree`,
     else the interactive `[path / N]` prompt (where 'n' means none)."""
-    wt = getattr(args, "worktree", None)
+    wt = args.worktree
     if wt:
         return wt
-    if getattr(args, "no_worktree", False):
+    if args.no_worktree:
         return ""
     _require_input(args, "worktree choice", "--worktree PATH or --no-worktree")
     reply = _prompt(f"Create worktree for {name}? [path / N]: ") or ""
@@ -2089,7 +2089,7 @@ def _split_child(
     `commit_hash`; the new branch is created at the old tip first so no commit is lost, and
     `branch`'s existing tree-children re-point onto it (forks left as-is — the new branch
     inherits the old tip's full history). `branch`'s own parent/fork are untouched."""
-    new_name = getattr(args, "name", None)
+    new_name = args.name
     if not new_name:
         _require_input(args, "new branch name", "--name")
         new_name = _prompt("New child branch name: ")
@@ -2176,9 +2176,9 @@ def cmd_split(args: argparse.Namespace) -> None:
     if len(commits) < 2:
         raise TreeError("Need at least 2 commits to split.")
 
-    child_mode = getattr(args, "child", False)
+    child_mode = args.child
 
-    after = getattr(args, "after", None)
+    after = args.after
     if after:
         commit_hash = _resolve_split_point(after, old_fork)
     else:
@@ -2194,7 +2194,7 @@ def cmd_split(args: argparse.Namespace) -> None:
         _split_child(args, branch, old_fork, commit_hash)
         return
 
-    parent_name = getattr(args, "name", None)
+    parent_name = args.name
     if not parent_name:
         _require_input(args, "new branch name", "--name")
         parent_name = _prompt("New parent branch name: ")
@@ -2625,7 +2625,7 @@ def _render_manpage(parser: argparse.ArgumentParser) -> str:
 
 def cmd_manpage(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
     roff = _render_manpage(parser)
-    if not getattr(args, "install", False):
+    if not args.install:
         sys.stdout.write(roff)
         return
     man_dir = Path(args.dir).expanduser() if args.dir else Path.home() / ".local/share/man/man1"

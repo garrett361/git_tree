@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import argparse
 import os
 import shutil
 from pathlib import Path
@@ -21,7 +20,7 @@ from git_tree.cli import (
     discover,
 )
 
-from .conftest import RepoHelper, _git
+from .conftest import RepoHelper, _git, cli_args
 
 
 def _add_submodule(repo: RepoHelper, name: str, tmp_path: Path) -> Path:
@@ -48,7 +47,7 @@ def _corrupt_submodule(worktree: Path, submodule_path: str) -> None:
 
 class TestRebuild:
     def _ns(self, branch: str | None = None, yes: bool = True, force: bool = False):
-        return argparse.Namespace(branch=branch, yes=yes, force=force)
+        return cli_args(branch=branch, yes=yes, force=force)
 
     def test_rebuild_recreates_worktree(
         self, repo: RepoHelper, tmp_path, monkeypatch, capsys
@@ -141,7 +140,7 @@ class TestRemoveSubmodule:
         return wt
 
     def _ns(self, force: bool = False):
-        return argparse.Namespace(branch="child", yes=True, force=force)
+        return cli_args(branch="child", yes=True, force=force)
 
     def test_removes_clean_submodule_worktree(self, repo, tmp_path, monkeypatch) -> None:
         _allow_file_protocol(monkeypatch)
@@ -250,7 +249,7 @@ class TestBranchSubmoduleInit:
         _add_submodule(repo, "mysub", tmp_path)
 
         wt_path = str(tmp_path / "wt-child")
-        cmd_branch(argparse.Namespace(command="branch", name="child", path=wt_path))
+        cmd_branch(cli_args(command="branch", name="child", path=wt_path))
 
         assert (Path(wt_path) / "mysub" / ".git").exists()
         assert (Path(wt_path) / "mysub" / "readme.txt").exists()
@@ -263,9 +262,7 @@ class TestBranchSubmoduleInit:
         _add_submodule(repo, "mysub", tmp_path)
 
         wt_path = str(tmp_path / "wt-child")
-        cmd_branch(
-            argparse.Namespace(command="branch", name="child", path=wt_path, no_submodule_init=True)
-        )
+        cmd_branch(cli_args(command="branch", name="child", path=wt_path, no_submodule_init=True))
 
         assert (Path(wt_path) / "mysub").exists()
         assert not (Path(wt_path) / "mysub" / "readme.txt").exists()
@@ -290,9 +287,7 @@ class TestPropagateSubmoduleHealth:
         _corrupt_submodule(wt, "mysub")
 
         with pytest.raises(TreeError):
-            cmd_propagate(
-                argparse.Namespace(dry_run=False, no_auto_rerere=False, branch=None, yes=True)
-            )
+            cmd_propagate(cli_args(dry_run=False, no_auto_rerere=False, branch=None, yes=True))
         err = capsys.readouterr().err
         assert "corrupted submodule state" in err
         assert "git tree rebuild" in err
@@ -325,9 +320,7 @@ class TestPropagateSubmoduleHealth:
         _corrupt_submodule(wt, "mysub")
 
         with pytest.raises(TreeError):
-            cmd_propagate(
-                argparse.Namespace(dry_run=False, no_auto_rerere=False, branch="main", yes=True)
-            )
+            cmd_propagate(cli_args(dry_run=False, no_auto_rerere=False, branch="main", yes=True))
         err = capsys.readouterr().err
         assert "corrupted submodule state" in err  # health gate won
         assert "rebase in progress" not in err  # clean gate never got to report
@@ -347,9 +340,7 @@ class TestPropagateSubmoduleHealth:
         repo.checkout("main")
         repo.commit("extra.txt", "extra", "advance main")
 
-        cmd_propagate(
-            argparse.Namespace(dry_run=False, no_auto_rerere=False, branch=None, yes=True)
-        )
+        cmd_propagate(cli_args(dry_run=False, no_auto_rerere=False, branch=None, yes=True))
         log = _git("log", "--oneline", "child", cwd=repo.work)
         assert "advance main" in log
 
@@ -385,7 +376,7 @@ class TestRebaseSubmoduleHealth:
 
         with pytest.raises(TreeError):
             cmd_rebase(
-                argparse.Namespace(
+                cli_args(
                     command="rebase",
                     target="main",
                     dry_run=False,
@@ -419,7 +410,7 @@ class TestRebaseSubmoduleHealth:
 
         with pytest.raises(TreeError):
             cmd_rebase(
-                argparse.Namespace(
+                cli_args(
                     command="rebase",
                     target="main",
                     dry_run=False,
@@ -596,7 +587,7 @@ class TestRebuildCwdGuard:
         monkeypatch.chdir(subdir)
 
         with pytest.raises(TreeError):
-            cmd_rebuild(argparse.Namespace(branch="child", yes=True, force=False))
+            cmd_rebuild(cli_args(branch="child", yes=True, force=False))
         err = capsys.readouterr().err
         assert "inside its worktree" in err
 
@@ -613,7 +604,7 @@ class TestRebuildCorruptedGitStatus:
         (wt / ".git").write_text("garbage\n")
 
         # Should succeed without --force since git status crash is caught
-        cmd_rebuild(argparse.Namespace(branch="child", yes=True, force=False))
+        cmd_rebuild(cli_args(branch="child", yes=True, force=False))
         assert wt.exists()
         assert (wt / "init.txt").exists()
 
@@ -637,7 +628,7 @@ class TestSubmoduleInitFailure:
         monkeypatch.setenv("GIT_CONFIG_VALUE_0", "never")  # block the re-init's file:// clone
 
         with pytest.raises(TreeError) as exc:
-            cmd_rebuild(argparse.Namespace(branch="child", yes=True, force=True))
+            cmd_rebuild(cli_args(branch="child", yes=True, force=True))
         assert exc.value.code == 4
         captured = capsys.readouterr()
         assert "submodule init failed" in captured.err
@@ -651,7 +642,7 @@ class TestSubmoduleInitFailure:
         monkeypatch.setenv("GIT_CONFIG_VALUE_0", "never")  # block the init's file:// clone
 
         wt_path = str(tmp_path / "wt-child")
-        cmd_branch(argparse.Namespace(command="branch", name="child", path=wt_path))
+        cmd_branch(cli_args(command="branch", name="child", path=wt_path))
         captured = capsys.readouterr()
         assert "Warning: submodule init did not complete" in captured.err
         assert "Created branch child" in captured.out  # branch creation still succeeded

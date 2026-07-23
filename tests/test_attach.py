@@ -1,17 +1,16 @@
 from __future__ import annotations
 
-import argparse
 import subprocess
 
 import pytest
 
 from git_tree.cli import TreeError, cmd_attach, cmd_detach, discover, roots
 
-from .conftest import RepoHelper, _git
+from .conftest import RepoHelper, _git, cli_args
 
 
 def _ns(**kwargs) -> object:
-    return argparse.Namespace(**kwargs)
+    return cli_args(**kwargs)
 
 
 class TestAttach:

@@ -1,27 +1,16 @@
 from __future__ import annotations
 
-import argparse
-
 import pytest
 
 from git_tree.cli import TreeError, _root_remote, cmd_split, discover
 
-from .conftest import RepoHelper
+from .conftest import RepoHelper, cli_args
 
 
 def _ns(**kwargs) -> object:
-    # cmd_split reads each field via getattr; supply the split fields explicitly. `yes` defaults
-    # to True so mechanics tests skip the --child rewind confirmation (its own tests set yes=False).
-    fields = {
-        "after": None,
-        "name": None,
-        "child": False,
-        "worktree": None,
-        "no_worktree": False,
-        "yes": True,
-    }
-    fields.update(kwargs)
-    return argparse.Namespace(command="split", **fields)
+    # A complete split namespace; `yes` defaults to True so mechanics tests skip the --child rewind
+    # confirmation (its own tests set yes=False).
+    return cli_args(command="split", **{"yes": True, **kwargs})
 
 
 def _no_prompt(*_args, **_kwargs):
@@ -46,7 +35,7 @@ class TestSplit:
         monkeypatch.setattr("git_tree.cli.fzf_select", lambda items, **kw: [split_line])
         monkeypatch.setattr("builtins.input", lambda _: next(inputs))
 
-        cmd_split(None)
+        cmd_split(cli_args(command="split"))
 
         graph = discover()
         assert graph.parent_of["feature-base"] == "main"
@@ -74,7 +63,7 @@ class TestSplit:
         monkeypatch.setattr("builtins.input", lambda _: next(inputs))
 
         with pytest.raises(TreeError):
-            cmd_split(None)
+            cmd_split(cli_args(command="split"))
 
         assert discover().parent_of["feature"] == "main"
 
@@ -84,7 +73,7 @@ class TestSplit:
         repo.commit("f1.txt", "f1", "only commit")
 
         with pytest.raises(SystemExit):
-            cmd_split(None)
+            cmd_split(cli_args(command="split"))
 
     def test_creates_worktree_when_path_given(
         self, repo: RepoHelper, monkeypatch, tmp_path
@@ -102,7 +91,7 @@ class TestSplit:
         monkeypatch.setattr("git_tree.cli.fzf_select", lambda items, **kw: [split_line])
         monkeypatch.setattr("builtins.input", lambda _: next(inputs))
 
-        cmd_split(None)
+        cmd_split(cli_args(command="split"))
 
         worktrees = repo.git("worktree", "list", "--porcelain")
         assert "feature-parent" in worktrees
@@ -127,7 +116,7 @@ class TestSplit:
         monkeypatch.setattr("git_tree.cli.fzf_select", lambda items, **kw: [split_line])
         monkeypatch.setattr("builtins.input", lambda _: next(inputs))
 
-        cmd_split(None)  # must not raise despite the worktree failure
+        cmd_split(cli_args(command="split"))  # must not raise despite the worktree failure
 
         # The split itself was applied.
         graph = discover()

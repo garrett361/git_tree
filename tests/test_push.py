@@ -1,17 +1,16 @@
 from __future__ import annotations
 
-import argparse
 import json
 
 import pytest
 
 from git_tree.cli import TreeError, cmd_push, main
 
-from .conftest import RepoHelper
+from .conftest import RepoHelper, cli_args
 
 
 def _ns(dry_run: bool = False, yes: bool = False) -> object:
-    return argparse.Namespace(dry_run=dry_run, yes=yes)
+    return cli_args(dry_run=dry_run, yes=yes)
 
 
 def _no_confirm(_message: str) -> bool:

@@ -1,23 +1,20 @@
 from __future__ import annotations
 
-import argparse
 from pathlib import Path
 
 import pytest
 
 from git_tree.cli import cmd_propagate, cmd_rebase, cmd_remove, discover
 
-from .conftest import RepoHelper
+from .conftest import RepoHelper, cli_args
 
 
 def _rebase_ns(target: str) -> object:
-    return argparse.Namespace(
-        command="rebase", target=target, dry_run=False, no_auto_rerere=False, yes=True
-    )
+    return cli_args(command="rebase", target=target, dry_run=False, no_auto_rerere=False, yes=True)
 
 
 def _remove_ns(branch: str) -> object:
-    return argparse.Namespace(branch=branch, yes=True)
+    return cli_args(branch=branch, yes=True)
 
 
 def _commit(repo: RepoHelper, wt: Path, filename: str, content: str, message: str) -> None:
@@ -171,9 +168,7 @@ class TestSquashMergeCleanup:
         # Resolve and resume via the documented recovery path: re-run the propagate of the child.
         (wt_c / "conflict.txt").write_text("resolved\n")
         repo.git("add", "conflict.txt", cwd=wt_c)
-        cmd_propagate(
-            argparse.Namespace(branch="C", dry_run=False, no_auto_rerere=False, yes=False)
-        )
+        cmd_propagate(cli_args(branch="C", dry_run=False, no_auto_rerere=False, yes=False))
 
         graph = discover()
         assert graph.parent_of["C"] == "main"

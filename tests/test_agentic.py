@@ -9,11 +9,11 @@ import pytest
 
 from git_tree.cli import _build_parser, _render_completions, cmd_propagate, main
 
-from .conftest import RepoHelper
+from .conftest import RepoHelper, cli_args
 
 
 def _prop_ns(**kw) -> argparse.Namespace:
-    return argparse.Namespace(
+    return cli_args(
         dry_run=kw.get("dry_run", False),
         no_auto_rerere=kw.get("no_auto_rerere", False),
         branch=kw.get("branch"),

@@ -1,16 +1,14 @@
 from __future__ import annotations
 
-import argparse
-
 import pytest
 
 from git_tree.cli import TreeError, cmd_remove, discover
 
-from .conftest import RepoHelper
+from .conftest import RepoHelper, cli_args
 
 
 def _ns(branch: str | None = None, yes: bool = False) -> object:
-    return argparse.Namespace(branch=branch, yes=yes)
+    return cli_args(branch=branch, yes=yes)
 
 
 def _branch_exists(repo: RepoHelper, name: str) -> bool:

@@ -104,6 +104,8 @@ Single module: `git_tree/cli.py`. All commands, git helpers, graph discovery, an
 
 Real git operations against isolated repos (no mocking). The `repo` fixture (`tests/conftest.py`) creates a bare origin + clone in `tmp_path` and `chdir`s into it. `RepoHelper` provides `commit()`, `branch()`, `checkout()`, `set_parent()`, `worktree()`, `push()`.
 
+To call a `cmd_*` handler directly, build its args with `cli_args(**overrides)` (`tests/conftest.py`), which returns a **complete** namespace (every flag at its parser default, derived by walking `_build_parser()`). Do not hand-build `argparse.Namespace(...)` with only the fields a test cares about: partial namespaces are what forced production handlers to read args defensively via `getattr`. Handlers read `args.<flag>` directly, so a missing field is a bug in the fixture, not something the code should tolerate.
+
 ## Conventions
 
 - Python 3.11+, stdlib only (no runtime deps)

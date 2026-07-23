@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import argparse
 import shutil
 from pathlib import Path
 
@@ -8,7 +7,7 @@ import pytest
 
 from git_tree.cli import TreeError, _has_active_rebase, cmd_propagate, discover
 
-from .conftest import RepoHelper
+from .conftest import RepoHelper, cli_args
 
 
 def _ns(
@@ -18,9 +17,7 @@ def _ns(
     branch: str | None = None,
     yes: bool = False,
 ) -> object:
-    return argparse.Namespace(
-        dry_run=dry_run, no_auto_rerere=no_auto_rerere, branch=branch, yes=yes
-    )
+    return cli_args(dry_run=dry_run, no_auto_rerere=no_auto_rerere, branch=branch, yes=yes)
 
 
 def _no_confirm(_message: str) -> bool:

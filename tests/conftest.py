@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import os
 import shutil
 import subprocess
@@ -7,6 +8,26 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+
+
+def cli_args(**overrides: object) -> argparse.Namespace:
+    """A complete git-tree args namespace, every flag at its parser default, for calling `cmd_*`
+    handlers directly. Built by walking the real parser, so it stays in sync with the command
+    surface and production code never needs `getattr` fallbacks to tolerate partial fixtures."""
+    from git_tree.cli import _build_parser
+
+    parser = _build_parser()
+    actions = list(parser._actions)
+    sub = next((a for a in actions if isinstance(a, argparse._SubParsersAction)), None)
+    if sub is not None:
+        for subparser in sub.choices.values():
+            actions.extend(subparser._actions)
+    defaults: dict[str, object] = {}
+    for action in actions:
+        if action.dest == "help" or action.default is argparse.SUPPRESS:
+            continue
+        defaults.setdefault(action.dest, action.default)
+    return argparse.Namespace(**{**defaults, **overrides})
 
 
 def _git(*args: str, cwd: Path, check: bool = True, env: dict[str, str] | None = None) -> str:

@@ -6,13 +6,13 @@ import pytest
 
 from git_tree.cli import cmd_propagate
 
-from .conftest import RepoHelper
+from .conftest import RepoHelper, cli_args
 
 
 def _ns(**kw: object) -> argparse.Namespace:
     base: dict[str, object] = dict(dry_run=False, no_auto_rerere=False, branch=None, yes=True)
     base.update(kw)
-    return argparse.Namespace(**base)
+    return cli_args(**base)
 
 
 def test_git_tree_rebase_does_not_move_unrelated_branch(

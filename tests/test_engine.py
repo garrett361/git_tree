@@ -2,17 +2,15 @@
 
 from __future__ import annotations
 
-import argparse
-
 import pytest
 
 from git_tree.cli import _stash_push_if_created, cmd_propagate
 
-from .conftest import RepoHelper
+from .conftest import RepoHelper, cli_args
 
 
 def _ns(*, branch: str | None = None) -> object:
-    return argparse.Namespace(dry_run=False, no_auto_rerere=False, branch=branch)
+    return cli_args(dry_run=False, no_auto_rerere=False, branch=branch)
 
 
 def _commit_in(repo: RepoHelper, wt, filename: str, content: str, message: str) -> None:

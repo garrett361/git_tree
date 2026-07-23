@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import argparse
-
 import pytest
 
 from git_tree.cli import (
@@ -14,13 +12,11 @@ from git_tree.cli import (
     discover,
 )
 
-from .conftest import RepoHelper
+from .conftest import RepoHelper, cli_args
 
 
 def _ns(target: str, yes: bool = False) -> object:
-    return argparse.Namespace(
-        command="rebase", target=target, dry_run=False, no_auto_rerere=False, yes=yes
-    )
+    return cli_args(command="rebase", target=target, dry_run=False, no_auto_rerere=False, yes=yes)
 
 
 def _no_confirm(_message: str) -> bool:
@@ -123,9 +119,7 @@ class TestRebase:
         head_before = repo.git("rev-parse", "feature")
 
         monkeypatch.chdir(wt)
-        cmd_rebase(
-            argparse.Namespace(command="rebase", target="main", dry_run=True, no_auto_rerere=False)
-        )
+        cmd_rebase(cli_args(command="rebase", target="main", dry_run=True, no_auto_rerere=False))
 
         assert repo.git("rev-parse", "feature") == head_before
         out = capsys.readouterr().out
@@ -288,7 +282,7 @@ class TestRebase:
         assert _root_remote(discover(), "a") == ("new-base", "origin")
         # The actual symptom of the bug: push could not resolve a remote. Now it can.
         capsys.readouterr()
-        cmd_push(argparse.Namespace(dry_run=True))
+        cmd_push(cli_args(command="push", dry_run=True))
         assert "Pushing to origin" in capsys.readouterr().out
 
         # main keeps its remote so the still-rooted sibling continues to resolve it.
@@ -385,9 +379,7 @@ class TestRebaseResumeViaPropagate:
 
         (wt_B / "shared.txt").write_text("resolved")
         repo.git("add", "shared.txt", cwd=wt_B)
-        cmd_propagate(
-            argparse.Namespace(branch="B", dry_run=False, no_auto_rerere=False, yes=False)
-        )
+        cmd_propagate(cli_args(branch="B", dry_run=False, no_auto_rerere=False, yes=False))
 
         assert not _has_active_rebase(wt_B)
         assert discover().parent_of["B"] == "T"  # reparent stuck
@@ -430,7 +422,5 @@ class TestRebaseResumeViaPropagate:
 
         (wt_D / "shared.txt").write_text("resolved")
         repo.git("add", "shared.txt", cwd=wt_D)
-        cmd_propagate(
-            argparse.Namespace(branch="B", dry_run=False, no_auto_rerere=False, yes=False)
-        )
+        cmd_propagate(cli_args(branch="B", dry_run=False, no_auto_rerere=False, yes=False))
         assert not _has_active_rebase(wt_D)
