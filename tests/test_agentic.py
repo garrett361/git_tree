@@ -7,7 +7,7 @@ import re
 
 import pytest
 
-from git_tree.cli import _BASH_COMPLETION, _ZSH_COMPLETION, _build_parser, cmd_propagate, main
+from git_tree.cli import _build_parser, _render_completions, cmd_propagate, main
 
 from .conftest import RepoHelper
 
@@ -264,49 +264,95 @@ class TestManpage:
         assert "AGENTS.md" in out
 
 
-class TestCompletionsInSync:
-    """The zsh/bash completion strings are hand-maintained twins of the argparse parser (not
-    derived from it), so they silently drift when a subcommand or flag is added. These tests
-    walk the parser and fail if either completion omits a subcommand or one of its flags."""
+class TestCompletionGeneration:
+    """Completions are generated from the parser (single source of truth), so they can't drift out
+    of sync the way the old hand-written strings could. These assert the generated scripts complete
+    the right tokens per subcommand, escape correctly, and parse under the real shells."""
 
-    # Universal flags added to every subparser via the shared `common` parent; the completions
-    # intentionally don't list them per-command, so they're excluded from the per-command check.
-    _UNIVERSAL = {"-h", "--help", "--json", "--no-input"}
+    # Options every subparser inherits (the `common` parent + argparse's -h) plus the top-level
+    # --all: the completions intentionally never list them per subcommand.
+    _UNIVERSAL = {"-h", "--help", "--json", "--no-input", "--all"}
 
-    def _subparsers(self):
+    def _subcommands(self):
         parser = _build_parser()
         sub = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
         return sub.choices
 
-    def test_every_subcommand_is_completable(self) -> None:
-        for name in self._subparsers():
-            assert name in _ZSH_COMPLETION, f"zsh completion missing subcommand: {name}"
-            assert name in _BASH_COMPLETION, f"bash completion missing subcommand: {name}"
+    @staticmethod
+    def _arm(script: str, name: str) -> str | None:
+        """The case-arm body for subcommand `name`, or None if it has no arm."""
+        m = re.search(rf"^        {re.escape(name)}\)\n(.*?)\n            ;;", script, re.S | re.M)
+        return m.group(1) if m else None
 
-    def test_every_flag_is_completable(self) -> None:
-        for name, subparser in self._subparsers().items():
-            flags = {
-                opt
-                for action in subparser._actions
-                for opt in action.option_strings
-                if opt.startswith("--") and opt not in self._UNIVERSAL
-            }
-            for flag in flags:
-                assert flag in _ZSH_COMPLETION, f"zsh completion missing {name} flag: {flag}"
-                assert flag in _BASH_COMPLETION, f"bash completion missing {name} flag: {flag}"
+    def test_nonuniversal_flags_appear_in_each_arm(self) -> None:
+        for shell in ("zsh", "bash"):
+            script = _render_completions(_build_parser(), shell)
+            for name, subparser in self._subcommands().items():
+                flags = [
+                    opt
+                    for action in subparser._actions
+                    for opt in action.option_strings
+                    if opt.startswith("--") and opt not in self._UNIVERSAL
+                ]
+                arm = self._arm(script, name)
+                for flag in flags:
+                    assert arm is not None, f"{shell}: no arm for {name}"
+                    assert flag in arm, f"{shell}: {name} arm missing flag {flag}"
 
-    def test_no_stale_completion_subcommands(self) -> None:
-        # Reverse direction: a completion must not list a subcommand the parser dropped (e.g. a
-        # deleted `continue`) — the forward checks above wouldn't catch a leftover entry.
-        parser_cmds = set(self._subparsers())
-        bash_cmds = set(re.search(r'subcmds="([^"]*)"', _BASH_COMPLETION).group(1).split())
-        assert bash_cmds <= parser_cmds, (
-            f"bash lists non-parser subcommands: {bash_cmds - parser_cmds}"
-        )
-        zsh_cmds = set(re.findall(r"^\s*'([a-z-]+):", _ZSH_COMPLETION, re.M))
-        assert zsh_cmds <= parser_cmds, (
-            f"zsh lists non-parser subcommands: {zsh_cmds - parser_cmds}"
-        )
+    def test_value_completers_land_in_the_expected_arms(self) -> None:
+        zsh = _render_completions(_build_parser(), "zsh")
+        bash = _render_completions(_build_parser(), "bash")
+        foreach = "git for-each-ref --format='%(refname:short)' refs/heads/"
+        for name in ("propagate", "rebase", "attach", "detach", "remove", "rebuild"):
+            assert "__git_heads" in self._arm(zsh, name)
+            assert foreach in self._arm(bash, name)
+        assert "__git_heads" in self._arm(zsh, "split")  # --after
+        assert "_directories" in self._arm(zsh, "split")  # --worktree
+        assert "_directories" in self._arm(zsh, "branch")  # path
+        assert "compgen -d" in self._arm(bash, "branch")
+        assert ":shell:(zsh bash)" in self._arm(zsh, "completions")
+        assert 'compgen -W "zsh bash"' in self._arm(bash, "completions")
+
+    def test_yes_flag_uses_the_zsh_exclusion_group(self) -> None:
+        zsh = _render_completions(_build_parser(), "zsh")
+        for name in ("propagate", "rebase", "detach", "remove", "rebuild", "split", "push"):
+            assert "'(-y --yes)'{-y,--yes}" in self._arm(zsh, name)
+
+    def test_universal_and_top_level_flags_are_never_listed(self) -> None:
+        for shell in ("zsh", "bash"):
+            script = _render_completions(_build_parser(), shell)
+            for flag in ("--json", "--no-input", "--all"):
+                assert flag not in script, f"{shell} should not list {flag}"
+
+    def test_zsh_escapes_apostrophes_in_descriptions(self) -> None:
+        # `remove`'s help contains an ASCII apostrophe; inside the single-quoted _describe entry it
+        # must be escaped ('\''), or a bare ' would truncate the spec (and quietly drop later ones).
+        zsh = _render_completions(_build_parser(), "zsh")
+        assert "subtree'\\''s worktrees" in zsh
+
+    def test_argless_subcommand_gets_no_arm(self) -> None:
+        # `log` has only universal flags, so like the old hand-written script it needs no case arm.
+        for shell in ("zsh", "bash"):
+            assert "\n        log)\n" not in _render_completions(_build_parser(), shell)
+
+    def test_arms_reference_only_real_subcommands(self) -> None:
+        names = set(self._subcommands())
+        for shell in ("zsh", "bash"):
+            script = _render_completions(_build_parser(), shell)
+            for arm in re.findall(r"^        ([a-z-]+)\)$", script, re.M):
+                assert arm in names, f"{shell}: arm for unknown subcommand {arm}"
+
+    def test_generated_scripts_parse(self) -> None:
+        import shutil
+        import subprocess
+
+        for shell in ("bash", "zsh"):
+            exe = shutil.which(shell)
+            if not exe:
+                continue
+            script = _render_completions(_build_parser(), shell)
+            proc = subprocess.run([exe, "-n"], input=script, capture_output=True, text=True)
+            assert proc.returncode == 0, f"{shell} -n rejected the generated script: {proc.stderr}"
 
 
 class TestDryRun:

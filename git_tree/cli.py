@@ -2400,24 +2400,13 @@ def cmd_log(args: argparse.Namespace) -> None:
 # ---------------------------------------------------------------------------
 
 
-_ZSH_COMPLETION = """\
+_ZSH_TEMPLATE = """\
 #compdef git-tree
 
 _git-tree() {
     local -a subcmds
     subcmds=(
-        'propagate:Propagate changes to all descendants'
-        'rebase:Rebase current branch + descendants onto new base'
-        'branch:Create or adopt a child branch with a worktree'
-        'attach:Attach current branch to tree'
-        'detach:Remove a branch from tree'
-        'remove:Remove a subtree’s worktrees, keep the branch refs'
-        'rebuild:Rebuild a corrupted worktree from the branch tip'
-        'split:Split current branch into parent + child'
-        'push:Push current branch + descendants'
-        'log:Show git log graph for all tree-branches'
-        'completions:Emit shell completion script'
-        'manpage:Emit a man page (roff); --install writes it to the man path'
+__SUBCMDS__
     )
 
     if (( CURRENT == 2 )); then
@@ -2426,82 +2415,19 @@ _git-tree() {
     fi
 
     case $words[2] in
-        propagate)
-            _arguments \
-                '--dry-run[Show what would be done]' \
-                '--no-auto-rerere[Disable auto-continue via rerere]' \
-                '(-y --yes)'{-y,--yes}'[Skip the confirmation prompt]' \
-                ':branch:__git_heads'
-            ;;
-        push)
-            _arguments \
-                '--dry-run[Show what would be done]' \
-                '(-y --yes)'{-y,--yes}'[Skip the confirmation prompt]'
-            ;;
-        rebase)
-            _arguments \
-                '--dry-run[Show what would be done]' \
-                '--no-auto-rerere[Disable auto-continue via rerere]' \
-                '(-y --yes)'{-y,--yes}'[Skip the confirmation prompt]' \
-                ':target:__git_heads'
-            ;;
-        branch)
-            _arguments \
-                '--no-submodule-init[Skip git submodule update --init --recursive]' \
-                ':path:_directories' \
-                ':name:'
-            ;;
-        split)
-            _arguments \
-                '--after[Commit to split after]:commit:__git_heads' \
-                '--name[New branch name]:name:' \
-                '--child[Keep current branch for early commits; new branch takes the rest]' \
-                '--worktree[Create the new branch worktree]:path:_directories' \
-                '--no-worktree[Do not create a worktree for the new branch]' \
-                '(-y --yes)'{-y,--yes}'[Skip the --child rewind confirmation]'
-            ;;
-        attach)
-            _arguments ':branch:__git_heads'
-            ;;
-        detach)
-            _arguments \
-                '(-y --yes)'{-y,--yes}'[Skip the confirmation prompt]' \
-                ':branch:__git_heads'
-            ;;
-        remove)
-            _arguments \
-                '--dry-run[Show what would be done]' \
-                '(-y --yes)'{-y,--yes}'[Skip the confirmation prompt]' \
-                '--force[Remove even with uncommitted changes]' \
-                ':branch:__git_heads'
-            ;;
-        rebuild)
-            _arguments \
-                '--force[Proceed even if worktree has uncommitted changes]' \
-                '(-y --yes)'{-y,--yes}'[Skip the confirmation prompt]' \
-                ':branch:__git_heads'
-            ;;
-        completions)
-            _arguments ':shell:(zsh bash)'
-            ;;
-        manpage)
-            _arguments \
-                '--install[Write the man page to the man path]' \
-                '--dir[Install directory]:dir:_directories'
-            ;;
+__ARMS__
     esac
 }
 
 _git-tree "$@"
 """
 
-_BASH_COMPLETION = """\
+_BASH_TEMPLATE = """\
 _git_tree() {
     local cur prev subcmds
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    subcmds="propagate rebase branch attach detach remove"
-    subcmds="$subcmds rebuild split push log completions manpage"
+    subcmds="__SUBCMDS__"
 
     if [[ $COMP_CWORD -eq 1 ]]; then
         COMPREPLY=($(compgen -W "$subcmds" -- "$cur"))
@@ -2509,84 +2435,151 @@ _git_tree() {
     fi
 
     case "${COMP_WORDS[1]}" in
-        propagate)
-            if [[ "$cur" == -* ]]; then
-                COMPREPLY=($(compgen -W "--dry-run --no-auto-rerere -y --yes" -- "$cur"))
-            else
-                local branches=$(git for-each-ref --format='%(refname:short)' refs/heads/)
-                COMPREPLY=($(compgen -W "$branches" -- "$cur"))
-            fi
-            ;;
-        push)
-            COMPREPLY=($(compgen -W "--dry-run -y --yes" -- "$cur"))
-            ;;
-        rebase)
-            if [[ "$cur" == -* ]]; then
-                COMPREPLY=($(compgen -W "--dry-run --no-auto-rerere -y --yes" -- "$cur"))
-            else
-                local branches=$(git for-each-ref --format='%(refname:short)' refs/heads/)
-                COMPREPLY=($(compgen -W "$branches" -- "$cur"))
-            fi
-            ;;
-        branch)
-            if [[ "$cur" == -* ]]; then
-                COMPREPLY=($(compgen -W "--no-submodule-init" -- "$cur"))
-            else
-                COMPREPLY=($(compgen -d -- "$cur"))
-            fi
-            ;;
-        split)
-            if [[ "$cur" == -* ]]; then
-                local opts="--after --name --child --worktree --no-worktree -y --yes"
-                COMPREPLY=($(compgen -W "$opts" -- "$cur"))
-            fi
-            ;;
-        attach)
-            local branches=$(git for-each-ref --format='%(refname:short)' refs/heads/)
-            COMPREPLY=($(compgen -W "$branches" -- "$cur"))
-            ;;
-        detach)
-            if [[ "$cur" == -* ]]; then
-                COMPREPLY=($(compgen -W "-y --yes" -- "$cur"))
-            else
-                local branches=$(git for-each-ref --format='%(refname:short)' refs/heads/)
-                COMPREPLY=($(compgen -W "$branches" -- "$cur"))
-            fi
-            ;;
-        remove)
-            if [[ "$cur" == -* ]]; then
-                COMPREPLY=($(compgen -W "--dry-run -y --yes --force" -- "$cur"))
-            else
-                local branches=$(git for-each-ref --format='%(refname:short)' refs/heads/)
-                COMPREPLY=($(compgen -W "$branches" -- "$cur"))
-            fi
-            ;;
-        rebuild)
-            if [[ "$cur" == -* ]]; then
-                COMPREPLY=($(compgen -W "--force -y --yes" -- "$cur"))
-            else
-                local branches=$(git for-each-ref --format='%(refname:short)' refs/heads/)
-                COMPREPLY=($(compgen -W "$branches" -- "$cur"))
-            fi
-            ;;
-        completions)
-            COMPREPLY=($(compgen -W "zsh bash" -- "$cur"))
-            ;;
-        manpage)
-            COMPREPLY=($(compgen -W "--install --dir" -- "$cur"))
-            ;;
+__ARMS__
     esac
 }
 
 complete -F _git_tree git-tree
 """
 
+# Options every subparser inherits (via the `common` parent + argparse's -h); the completions
+# intentionally never list them per-command, so the generator skips them.
+_UNIVERSAL_OPTS = {"-h", "--help", "--json", "--no-input"}
+# zsh completer function per `.completer` tag (set on the arg in _build_parser).
+_ZSH_COMPLETER = {"git_heads": "__git_heads", "directories": "_directories"}
+
+
+def _completable_actions(subparser: argparse.ArgumentParser):
+    """A subparser's (options, positionals), minus -h and the universal --json/--no-input."""
+    options, positionals = [], []
+    for action in subparser._actions:
+        if any(opt in _UNIVERSAL_OPTS for opt in action.option_strings):
+            continue
+        (options if action.option_strings else positionals).append(action)
+    return options, positionals
+
+
+def _arg_label(action: argparse.Action) -> str:
+    """The zsh `:message:` label for an arg's value: its metavar if set, else its dest.
+
+    (metavar can be a tuple for multi-metavar args; none of ours are, so fall back to dest.)"""
+    return action.metavar if isinstance(action.metavar, str) else action.dest
+
+
+def _zsh_escape(text: str) -> str:
+    """Escape a single-quoted zsh body; only `'` needs it (`'\\''` closes, escapes, reopens)."""
+    return text.replace("'", "'\\''")
+
+
+def _zsh_value(action: argparse.Action) -> str:
+    """The zsh action after an arg's `:message:`: a completer, a literal choice set, or empty."""
+    completer = getattr(action, "completer", None)
+    if completer:
+        return _ZSH_COMPLETER[completer]
+    if action.choices:
+        return "(" + " ".join(action.choices) + ")"
+    return ""
+
+
+def _zsh_spec(action: argparse.Action) -> str:
+    """One zsh `_arguments` spec for an option (flag or value-taking) or a positional."""
+    desc = _zsh_escape(action.help or "")
+    if not action.option_strings:  # positional
+        return "':" + _arg_label(action) + ":" + _zsh_value(action) + "'"
+    opts = action.option_strings
+    if action.nargs == 0:  # a flag
+        if len(opts) > 1:  # e.g. -y/--yes: mutually exclusive
+            return "'(" + " ".join(opts) + ")'{" + ",".join(opts) + "}'[" + desc + "]'"
+        return "'" + opts[0] + "[" + desc + "]'"
+    return "'" + opts[0] + "[" + desc + "]:" + _arg_label(action) + ":" + _zsh_value(action) + "'"
+
+
+def _render_zsh(parser: argparse.ArgumentParser) -> str:
+    sub = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
+    helps = {a.dest: a.help or "" for a in getattr(sub, "_choices_actions", [])}
+    subcmds = "\n".join(
+        f"        '{name}:{_zsh_escape(helps.get(name, ''))}'" for name in sub.choices
+    )
+
+    arms = []
+    for name, subparser in sub.choices.items():
+        options, positionals = _completable_actions(subparser)
+        if not options and not positionals:
+            continue  # nothing to complete (e.g. `log`): emit no case arm
+        specs = [_zsh_spec(a) for a in (*options, *positionals)]
+        body = " \\\n                ".join(specs)
+        arms.append(
+            "        "
+            + name
+            + ")\n            _arguments \\\n                "
+            + body
+            + "\n            ;;"
+        )
+
+    return _ZSH_TEMPLATE.replace("__SUBCMDS__", subcmds).replace("__ARMS__", "\n".join(arms))
+
+
+def _bash_value_lines(positionals: list[argparse.Action], indent: str) -> list[str]:
+    """Bash lines completing the first positional with a value completer/choices (bash can't switch
+    on positional index, so a later positional shares the first's completer)."""
+    for action in positionals:
+        completer = getattr(action, "completer", None)
+        if completer == "git_heads":
+            fmt = "--format='%(refname:short)'"
+            return [
+                indent + f"local branches=$(git for-each-ref {fmt} refs/heads/)",
+                indent + 'COMPREPLY=($(compgen -W "$branches" -- "$cur"))',
+            ]
+        if completer == "directories":
+            return [indent + 'COMPREPLY=($(compgen -d -- "$cur"))']
+        if action.choices:
+            words = " ".join(action.choices)
+            return [indent + 'COMPREPLY=($(compgen -W "' + words + '" -- "$cur"))']
+    return []
+
+
+def _render_bash(parser: argparse.ArgumentParser) -> str:
+    sub = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
+    arms = []
+    for name, subparser in sub.choices.items():
+        options, positionals = _completable_actions(subparser)
+        if not options and not positionals:
+            continue
+        optstrings = " ".join(opt for a in options for opt in a.option_strings)
+        value_else = _bash_value_lines(positionals, " " * 16)
+        if optstrings and value_else:
+            lines = [
+                '            if [[ "$cur" == -* ]]; then',
+                '                COMPREPLY=($(compgen -W "' + optstrings + '" -- "$cur"))',
+                "            else",
+                *value_else,
+                "            fi",
+            ]
+        elif optstrings:  # flag-only command: complete flags unconditionally
+            lines = ['            COMPREPLY=($(compgen -W "' + optstrings + '" -- "$cur"))']
+        else:  # positional-only command
+            lines = _bash_value_lines(positionals, " " * 12)
+        arms.append("        " + name + ")\n" + "\n".join(lines) + "\n            ;;")
+
+    return _BASH_TEMPLATE.replace("__SUBCMDS__", " ".join(sub.choices)).replace(
+        "__ARMS__", "\n".join(arms)
+    )
+
+
+def _render_completions(parser: argparse.ArgumentParser, shell: str) -> str:
+    """The zsh or bash completion script, derived entirely from the parser (subcommands, flags, help
+    text, choices) plus each value-arg's `.completer` tag. Single source of truth with `-h`."""
+    return _render_zsh(parser) if shell == "zsh" else _render_bash(parser)
+
+
+def _completes(action: argparse.Action, tag: str) -> None:
+    """Tag a value arg with its shell completer (`git_heads`/`directories`), read back via getattr
+    in the completion generator. Stored in __dict__ so it stays a plain dynamic attribute."""
+    action.__dict__["completer"] = tag
+
 
 def cmd_completions(args: argparse.Namespace) -> None:
-    if args.shell == "zsh":
-        print(_ZSH_COMPLETION)
-    else:
-        print(_BASH_COMPLETION)
+    print(_render_completions(_build_parser(), args.shell))
 
 
 def _render_manpage(parser: argparse.ArgumentParser) -> str:
@@ -2714,10 +2707,11 @@ def _render_error(args: argparse.Namespace, err: TreeError, out) -> NoReturn:
 
 def _build_parser() -> argparse.ArgumentParser:
     """Build the full argument parser. Sole source of truth for the command surface: `main`
-    dispatches on it, `_render_manpage` and `-h` render from it, and the completion-drift test
-    walks it. The hand-maintained completion strings are NOT derived from it, so any subcommand
-    or flag added here must also be added to `_ZSH_COMPLETION` and `_BASH_COMPLETION` (a test
-    enforces this)."""
+    dispatches on it (via each subparser's set_defaults(func=...)), and `_render_manpage`, `-h`,
+    and `_render_completions` (both shells) all derive from it. A subcommand added here is wired
+    for dispatch, help, the man page, and completions by that one `add_parser` block; a value arg
+    that should complete branches or paths carries a `_completes(..., "git_heads"/"directories")`
+    tag."""
     parser = argparse.ArgumentParser(
         prog="git-tree",
         description=__doc__,
@@ -2755,8 +2749,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "propagate", help="Propagate changes to all descendants", parents=[common]
     )
     propagate_p.set_defaults(func=cmd_propagate)
-    propagate_p.add_argument(
-        "branch", nargs="?", help="Branch to propagate from (default: current)"
+    _completes(
+        propagate_p.add_argument(
+            "branch", nargs="?", help="Branch to propagate from (default: current)"
+        ),
+        "git_heads",
     )
     propagate_p.add_argument("--dry-run", action="store_true", help="Show what would be done")
     propagate_p.add_argument(
@@ -2770,7 +2767,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "rebase", help="Rebase current branch + descendants onto new base", parents=[common]
     )
     rebase_p.set_defaults(func=cmd_rebase)
-    rebase_p.add_argument("target", help="Branch or ref to rebase onto")
+    _completes(rebase_p.add_argument("target", help="Branch or ref to rebase onto"), "git_heads")
     rebase_p.add_argument("--dry-run", action="store_true", help="Show what would be done")
     rebase_p.add_argument(
         "--no-auto-rerere", action="store_true", help="Disable auto-continue via rerere"
@@ -2781,7 +2778,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "branch", help="Create or adopt a child branch with a worktree", parents=[common]
     )
     branch_p.set_defaults(func=cmd_branch)
-    branch_p.add_argument("path", help="Worktree path for the branch")
+    _completes(branch_p.add_argument("path", help="Worktree path for the branch"), "directories")
     branch_p.add_argument("name", help="Branch name (new, or an existing branch to adopt)")
     branch_p.add_argument(
         "--no-submodule-init",
@@ -2791,11 +2788,17 @@ def _build_parser() -> argparse.ArgumentParser:
 
     attach_p = sub.add_parser("attach", help="Attach current branch to tree", parents=[common])
     attach_p.set_defaults(func=cmd_attach)
-    attach_p.add_argument("parent", nargs="?", help="Parent branch (fzf if omitted)")
+    _completes(
+        attach_p.add_argument("parent", nargs="?", help="Parent branch (fzf if omitted)"),
+        "git_heads",
+    )
 
     detach_p = sub.add_parser("detach", help="Remove a branch from tree", parents=[common])
     detach_p.set_defaults(func=cmd_detach)
-    detach_p.add_argument("branch", nargs="?", help="Branch to detach (default: current)")
+    _completes(
+        detach_p.add_argument("branch", nargs="?", help="Branch to detach (default: current)"),
+        "git_heads",
+    )
     detach_p.add_argument("-y", "--yes", action="store_true", help="Skip the confirmation prompt")
 
     remove_p = sub.add_parser(
@@ -2804,7 +2807,10 @@ def _build_parser() -> argparse.ArgumentParser:
         parents=[common],
     )
     remove_p.set_defaults(func=cmd_remove)
-    remove_p.add_argument("branch", nargs="?", help="Branch to remove (default: pick via fzf)")
+    _completes(
+        remove_p.add_argument("branch", nargs="?", help="Branch to remove (default: pick via fzf)"),
+        "git_heads",
+    )
     remove_p.add_argument("--dry-run", action="store_true", help="Show what would be done")
     remove_p.add_argument("-y", "--yes", action="store_true", help="Skip the confirmation prompt")
     remove_p.add_argument(
@@ -2819,7 +2825,12 @@ def _build_parser() -> argparse.ArgumentParser:
         parents=[common],
     )
     rebuild_p.set_defaults(func=cmd_rebuild)
-    rebuild_p.add_argument("branch", nargs="?", help="Branch to rebuild (default: pick via fzf)")
+    _completes(
+        rebuild_p.add_argument(
+            "branch", nargs="?", help="Branch to rebuild (default: pick via fzf)"
+        ),
+        "git_heads",
+    )
     rebuild_p.add_argument(
         "--force", action="store_true", help="Proceed even if worktree has uncommitted changes"
     )
@@ -2829,7 +2840,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "split", help="Split current branch into parent + child", parents=[common]
     )
     split_p.set_defaults(func=cmd_split)
-    split_p.add_argument("--after", metavar="COMMIT", help="Commit to split after (fzf if omitted)")
+    _completes(
+        split_p.add_argument(
+            "--after", metavar="COMMIT", help="Commit to split after (fzf if omitted)"
+        ),
+        "git_heads",
+    )
     split_p.add_argument("--name", metavar="BRANCH", help="New branch name (prompt if omitted)")
     split_p.add_argument(
         "--child",
@@ -2837,8 +2853,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Keep the current branch for the early commits; new branch takes the rest",
     )
     split_wt = split_p.add_mutually_exclusive_group()
-    split_wt.add_argument(
-        "--worktree", metavar="PATH", help="Create the new branch's worktree at PATH"
+    _completes(
+        split_wt.add_argument(
+            "--worktree", metavar="PATH", help="Create the new branch's worktree at PATH"
+        ),
+        "directories",
     )
     split_wt.add_argument(
         "--no-worktree", action="store_true", help="Don't create a worktree for the new branch"
@@ -2870,8 +2889,13 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Write the man page under the man path instead of printing to stdout",
     )
-    manpage_p.add_argument(
-        "--dir", metavar="DIR", help="Directory to install into (default: ~/.local/share/man/man1)"
+    _completes(
+        manpage_p.add_argument(
+            "--dir",
+            metavar="DIR",
+            help="Directory to install into (default: ~/.local/share/man/man1)",
+        ),
+        "directories",
     )
     return parser
 

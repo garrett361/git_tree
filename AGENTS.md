@@ -55,15 +55,12 @@ Fast inner loop: test files map 1:1 to commands (`test_rebase.py`, `test_push.py
 
 ## Adding a subcommand
 
-A command touches five sites; miss one and it half-works:
+A command touches two sites:
 
 1. The `cmd_<name>(args)` handler.
-2. `sub.add_parser(...)` in `_build_parser()` (the parser is the single source of truth for `-h` and the man page).
-3. The `commands` dispatch dict in `main()`.
-4. `_ZSH_COMPLETION`: the `subcmds` list and a `case` arm.
-5. `_BASH_COMPLETION`: the `subcmds` string and a `case` arm.
+2. `sub.add_parser(...)` in `_build_parser()`, with `.set_defaults(func=cmd_<name>)`. The parser is the single source of truth: that one block wires dispatch (`main()` calls `args.func`), `-h`, the man page (`_render_manpage`), and both shell completions (`_render_completions`). If a value arg should complete branches or paths, tag it with `_completes(parser.add_argument(...), "git_heads"/"directories")`.
 
-The completion strings (4, 5) are hand-maintained, **not** parser-derived; a test walks `_build_parser()` and fails if either omits the new subcommand or one of its flags, so lean on it. Commands that emit non-envelope output (`manpage`, `completions`) or have no JSON form (`log`) are special-cased in `main()` ahead of the dispatch dict.
+Commands that emit non-envelope output (`manpage`, `completions`) or have no JSON form (`log`) are special-cased in `main()` before the `args.func` dispatch; `manpage`/`completions` therefore set no `func` (and `cmd_manpage` takes the parser, so it could not be dispatched generically anyway). Completions are generated from the parser, so they cannot drift; `tests/test_agentic.py::TestCompletionGeneration` asserts the generated scripts complete the right tokens per subcommand and parse under the real shells.
 
 ## Architecture
 
