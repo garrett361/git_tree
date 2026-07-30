@@ -2291,10 +2291,6 @@ def cmd_push(args: argparse.Namespace) -> dict | None:
         if graph.parent_of.get(b) in blocked:
             blocked.add(b)
 
-    if all(b in blocked for b in pushable):
-        print("Nothing to push.")
-        return
-
     print(f"Pushing to {root_remote} (--force-with-lease):")
     for b in push_set:
         if b in stale:
