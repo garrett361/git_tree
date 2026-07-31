@@ -18,6 +18,25 @@ from pathlib import Path
 from typing import NoReturn
 
 
+class ErrorKind(StrEnum):
+    """The `error.kind` an agent branches on, from the JSON envelope.
+
+    A `StrEnum` so it reaches `json.dumps` and f-strings as the bare tag, while the tags
+    themselves stay closed: a member that does not exist fails at the raise site rather than
+    reaching a consumer as an unrecognised string.
+    """
+
+    ERROR = "error"
+    USAGE = "usage"
+    CONFLICT = "conflict"
+    PRECONDITION = "precondition"
+    NOT_A_TREE_BRANCH = "not_a_tree_branch"
+    INPUT_REQUIRED = "input_required"
+    CONFIRMATION_REQUIRED = "confirmation_required"
+    LEASE_REJECTED = "lease_rejected"
+    UNRESOLVED_CONFLICTS = "unresolved_conflicts"
+
+
 class TreeError(SystemExit):
     """Raised by helpers to exit with a user-facing message.
 
@@ -35,7 +54,7 @@ class TreeError(SystemExit):
         msg: str,
         code: int = 1,
         *,
-        kind: str | None = None,
+        kind: ErrorKind | None = None,
         branches: list[str] | None = None,
         remedy: list[str] | None = None,
     ):
@@ -60,7 +79,7 @@ class ConflictError(TreeError):
         conflicted_files: list[str],
         remedy: list[str] | None = None,
     ):
-        super().__init__(msg, code=3, kind="conflict", remedy=remedy)
+        super().__init__(msg, code=3, kind=ErrorKind.CONFLICT, remedy=remedy)
         self.branch = branch
         self.worktree = worktree
         self.conflicted_files = conflicted_files
@@ -771,7 +790,9 @@ def _no_input(args: argparse.Namespace) -> bool:
 def _require_input(args: argparse.Namespace, what: str, flag: str) -> None:
     """In --no-input mode, refuse to prompt for `what`, naming the `flag` that supplies it."""
     if _no_input(args):
-        raise TreeError(f"--no-input: {what} required; pass {flag}", code=4, kind="input_required")
+        raise TreeError(
+            f"--no-input: {what} required; pass {flag}", code=4, kind=ErrorKind.INPUT_REQUIRED
+        )
 
 
 def _proceed(args: argparse.Namespace, message: str) -> bool:
@@ -780,7 +801,7 @@ def _proceed(args: argparse.Namespace, message: str) -> bool:
         return True
     if _no_input(args):
         raise TreeError(
-            "confirmation required; pass -y/--yes", code=4, kind="confirmation_required"
+            "confirmation required; pass -y/--yes", code=4, kind=ErrorKind.CONFIRMATION_REQUIRED
         )
     return confirm(message)
 
@@ -1703,15 +1724,29 @@ def _has_active_rebase_safe(cwd: Path) -> bool:
         return False
 
 
+class SequencerOp(StrEnum):
+    """A git operation that is neither a rebase nor a plain edit, named as the user would say it.
+
+    The values read as prose because they are interpolated straight into refusals; a `StrEnum`
+    keeps that convenience while leaving nothing for a caller to compare against by hand.
+    """
+
+    MERGE = "merge"
+    CHERRY_PICK = "cherry-pick"
+    REVERT = "revert"
+    CHERRY_PICK_OR_REVERT = "cherry-pick or revert"  # `sequencer/` does not say which
+
+
+# Keys are git's own state file names, so they stay plain strings: data, not tags.
 _SEQUENCER_STATES = {
-    "MERGE_HEAD": "merge",
-    "CHERRY_PICK_HEAD": "cherry-pick",
-    "REVERT_HEAD": "revert",
-    "sequencer": "cherry-pick or revert",
+    "MERGE_HEAD": SequencerOp.MERGE,
+    "CHERRY_PICK_HEAD": SequencerOp.CHERRY_PICK,
+    "REVERT_HEAD": SequencerOp.REVERT,
+    "sequencer": SequencerOp.CHERRY_PICK_OR_REVERT,
 }
 
 
-def _pending_sequencer_op(cwd: Path) -> str | None:
+def _pending_sequencer_op(cwd: Path) -> SequencerOp | None:
     """The merge, cherry-pick, or revert left in progress in `cwd`, by name, else None.
 
     Nothing else notices these. Once the user stages their resolutions `git status` reports
@@ -1832,7 +1867,7 @@ def _require_clean_state(branches: list[str], graph: Graph, resume_cmd: list[str
         raise TreeError(
             "\n".join(lines),
             code=4,
-            kind="unresolved_conflicts",
+            kind=ErrorKind.UNRESOLVED_CONFLICTS,
             branches=[b for b, _ in unresolved],
         )
     if foreign or unresolved:
@@ -2046,7 +2081,7 @@ def _advance_branch(
             f"{branch} still has unresolved conflicts in {cwd}. Resolve them and `git add` the "
             f"files, then re-run: {' '.join(resume_cmd)}",
             code=4,
-            kind="unresolved_conflicts",
+            kind=ErrorKind.UNRESOLVED_CONFLICTS,
             branches=[branch],
         )
     rr = _rerere_args(auto_rerere)
@@ -2623,7 +2658,7 @@ def cmd_push(args: argparse.Namespace) -> dict | None:
         raise TreeError(
             f"push failed for: {', '.join(failed)}{hint}",
             code=1,
-            kind="lease_rejected" if lease_rejected else None,
+            kind=ErrorKind.LEASE_REJECTED if lease_rejected else None,
             branches=failed,
         )
 
@@ -3068,7 +3103,12 @@ FOR AGENTS:
 """
 
 
-_KIND_BY_CODE = {2: "usage", 3: "conflict", 4: "precondition", 5: "not_a_tree_branch"}
+_KIND_BY_CODE = {
+    2: ErrorKind.USAGE,
+    3: ErrorKind.CONFLICT,
+    4: ErrorKind.PRECONDITION,
+    5: ErrorKind.NOT_A_TREE_BRANCH,
+}
 
 
 def _envelope(args: argparse.Namespace, data: dict | None = None) -> dict:
@@ -3082,7 +3122,7 @@ def _error_envelope(args: argparse.Namespace, err: TreeError) -> dict:
     env = _envelope(args)
     env["ok"] = False
     error: dict = {
-        "kind": err.kind or _KIND_BY_CODE.get(err.code, "error"),
+        "kind": err.kind or _KIND_BY_CODE.get(err.code, ErrorKind.ERROR),
         "code": err.code,
         "message": err.message,
     }
