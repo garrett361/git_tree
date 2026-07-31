@@ -9,8 +9,15 @@ from git_tree.cli import cmd_propagate, cmd_rebase, cmd_remove, discover
 from .conftest import RepoHelper, cli_args
 
 
-def _rebase_ns(target: str) -> object:
-    return cli_args(command="rebase", target=target, dry_run=False, no_auto_rerere=False, yes=True)
+def _rebase_ns(target: str, branch: str | None = None) -> object:
+    return cli_args(
+        command="rebase",
+        target=target,
+        branch=branch,
+        dry_run=False,
+        no_auto_rerere=False,
+        yes=True,
+    )
 
 
 def _remove_ns(branch: str) -> object:
@@ -25,8 +32,8 @@ def _commit(repo: RepoHelper, wt: Path, filename: str, content: str, message: st
 
 class TestSquashMergeCleanup:
     """The protocol shipped as `git_tree/skills/git-tree-land/SKILL.md`: after B is squash-merged
-    into its parent, rebase each of B's children onto that parent (from the child's worktree),
-    then drop the now-childless B. Uses only existing commands (rebase + continue + remove).
+    into its parent, rebase each of B's children onto that parent (naming the child), then drop
+    the now-childless B. Uses only existing commands (rebase + continue + remove).
 
     This is the only *semantic* guard on that skill: `tests/test_skills.py` checks that the
     commands it names still parse, not that the procedure is still right. Change the ordering
@@ -64,10 +71,10 @@ class TestSquashMergeCleanup:
         repo.git("merge", "--squash", "B")
         repo.git("commit", "-m", "squash merge of B")
 
-        # Protocol step 2: rebase each direct child of B onto main, from its own worktree.
-        for child_wt in (wt_c, wt_d):
-            monkeypatch.chdir(child_wt)
-            cmd_rebase(_rebase_ns("main"))
+        # Protocol step 2: rebase each direct child of B onto main, naming the child so the
+        # fan-out needs no directory changes. cwd stays main's worktree throughout.
+        for child in ("C", "D"):
+            cmd_rebase(_rebase_ns("main", child))
 
         graph = discover()
         assert graph.parent_of["C"] == "main"

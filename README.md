@@ -62,11 +62,11 @@ git tree                               # show the current branch's tree
 git tree --all                         # show every tree
 git tree branch <path> <name>          # create or adopt a child branch with a worktree
 git tree attach [parent]               # attach current branch to tree
-git tree detach                        # remove current branch from tree (keeps branch + worktree)
+git tree detach [branch]               # remove a branch from the tree (default: current; keeps branch + worktree)
 git tree remove [branch]               # remove a subtree's worktrees + unregister its branches (keeps refs)
 git tree rebuild [branch]              # rebuild a corrupted worktree from the branch tip (keeps branch + tree config)
-git tree propagate                     # cascade current branch's changes to descendants (also resumes after a conflict)
-git tree rebase <target>               # reparent + rebase current branch onto <target>, then propagate
+git tree propagate [branch]            # cascade a branch's changes to descendants (default: current; also resumes after a conflict)
+git tree rebase <target> [branch]      # reparent + rebase a branch onto <target>, then propagate (default: current)
 git tree split                         # split current branch into parent + child
 git tree push                          # push current branch + descendants (--force-with-lease)
 git tree log                           # show a git log graph across the whole tree
@@ -79,7 +79,7 @@ git tree --version                     # print git-tree <version>
 > [!WARNING]
 > These commands touch more than the current branch:
 >
-> - **`propagate`, `rebase`, `push`**: the current branch and all its descendants (rebase or force-push the whole subtree).
+> - **`propagate`, `rebase`, `push`**: the named branch (default: current) and all its descendants (rebase or force-push the whole subtree). `push` always acts on the current branch.
 > - **`remove`**: deletes worktrees and unregisters the entire subtree (branch refs are kept).
 > - **`split --child`**: re-points the current branch's existing child branches onto the new branch.
 >
@@ -141,8 +141,9 @@ git tree detach && git tree attach fused-rmsnorm-kernel
 # fsdp2-sharding is a feature branch of several commits with a stack on top. You PR it and
 # it gets squash-merged into main. To re-home the stack onto the merged base:
 #   1. git pull                         (in main's worktree: pick up the squash commit)
-#   2. git tree rebase main             (from bf16-mixed-precision: re-parent onto main,
-#                                        drop fsdp2-sharding's merged commits, propagate to bf16-eval)
+#   2. git tree rebase main bf16-mixed-precision
+#                                       (re-parent onto main, drop fsdp2-sharding's merged
+#                                        commits, propagate to bf16-eval)
 #   3. git tree remove fsdp2-sharding   (tear down the merged, now-childless parent)
 
   main                                main
@@ -153,7 +154,7 @@ git tree detach && git tree attach fused-rmsnorm-kernel
 
 (After step 3, `fsdp2-sharding` is gone from the tree; its branch ref is kept.)
 
-`git tree rebase` reparents the current branch onto `<target>` and rebases the branch's own
+`git tree rebase` reparents a branch (the second argument, or the current branch) onto `<target>` and rebases the branch's own
 commits there, excluding the old parent's now-redundant commits (via the recorded fork boundary,
 so a squash-merged parent's commits drop out), then cascades the result to every descendant.
 Think of it as three steps:

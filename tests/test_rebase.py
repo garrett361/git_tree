@@ -15,8 +15,10 @@ from git_tree.cli import (
 from .conftest import RepoHelper, cli_args
 
 
-def _ns(target: str, yes: bool = False) -> object:
-    return cli_args(command="rebase", target=target, dry_run=False, no_auto_rerere=False, yes=yes)
+def _ns(target: str, yes: bool = False, branch: str | None = None) -> object:
+    return cli_args(
+        command="rebase", target=target, branch=branch, dry_run=False, no_auto_rerere=False, yes=yes
+    )
 
 
 def _no_confirm(_message: str) -> bool:
@@ -334,6 +336,140 @@ class TestRebase:
 
         assert repo.git("config", "branch.other.remote") == "upstream"
         assert _root_remote(discover(), "feature") == ("other", "upstream")
+
+
+class TestNamedBranch:
+    """`git tree rebase <target> [branch]` acts on the named branch, wherever it is run from."""
+
+    def _stack(self, repo: RepoHelper, tmp_path):
+        repo.branch("b", parent="main")
+        wt_b = repo.worktree("b", str(tmp_path / "wt-b"))
+        (wt_b / "b1.txt").write_text("b1")
+        repo.git("add", "b1.txt", cwd=wt_b)
+        repo.git("commit", "-m", "b commit", cwd=wt_b)
+        repo.branch("c", parent="b")
+        wt_c = repo.worktree("c", str(tmp_path / "wt-c"))
+        (wt_c / "c1.txt").write_text("c1")
+        repo.git("add", "c1.txt", cwd=wt_c)
+        repo.git("commit", "-m", "c commit", cwd=wt_c)
+        return wt_b, wt_c
+
+    def test_rebases_named_branch_and_cascades_without_chdir(
+        self, repo: RepoHelper, tmp_path
+    ) -> None:
+        self._stack(repo, tmp_path)
+        repo.checkout("main")
+        repo.commit("m2.txt", "m2", "new main commit")
+
+        cmd_rebase(_ns(target="main", branch="b", yes=True))  # cwd is main's worktree
+
+        c_log = repo.git("log", "--oneline", "c")
+        assert "new main commit" in c_log
+        assert "c commit" in c_log
+
+    def test_named_branch_wins_over_current_branch(
+        self, repo: RepoHelper, monkeypatch, tmp_path
+    ) -> None:
+        wt_b, wt_c = self._stack(repo, tmp_path)
+        repo.checkout("main")
+        repo.commit("m2.txt", "m2", "new main commit")
+        c_before = repo.git("rev-parse", "c")
+
+        monkeypatch.chdir(wt_c)  # standing on c, but naming b
+        cmd_rebase(_ns(target="main", branch="b", yes=True))
+
+        assert discover().parent_of["b"] == "main"
+        assert discover().parent_of["c"] == "b"  # c's edge untouched
+        assert repo.git("rev-parse", "c") != c_before  # c only moved by the cascade
+
+    def test_works_from_a_detached_head(self, repo: RepoHelper, monkeypatch, tmp_path) -> None:
+        self._stack(repo, tmp_path)
+        repo.checkout("main")
+        repo.commit("m2.txt", "m2", "new main commit")
+        repo.git("checkout", "--detach")
+
+        cmd_rebase(_ns(target="main", branch="b", yes=True))
+
+        assert "new main commit" in repo.git("log", "--oneline", "b")
+
+    def test_mid_rebase_branch_is_refused_without_touching_it(
+        self, repo: RepoHelper, monkeypatch, tmp_path
+    ) -> None:
+        """Naming a stuck branch must point at the resume verb, not drive its rebase to the end.
+
+        The conflict is resolved and staged first, which is the state `_require_clean_state`
+        admits as a resume point. Without the guard, `_skip_empty_commits` `git rebase --skip`s
+        past B's own commit and reports success, losing it permanently.
+        """
+        repo.commit("shared.txt", "original", "base shared")
+        repo.git("branch", "T", "main")
+        repo.set_parent("T", "main")
+        wt_T = repo.worktree("T", str(tmp_path / "wt-T"))
+        (wt_T / "shared.txt").write_text("T version")
+        repo.git("add", "shared.txt", cwd=wt_T)
+        repo.git("commit", "-m", "T edits shared", cwd=wt_T)
+
+        repo.git("branch", "B", "main")
+        repo.set_parent("B", "main")
+        wt_B = repo.worktree("B", str(tmp_path / "wt-B"))
+        (wt_B / "shared.txt").write_text("B version")
+        repo.git("add", "shared.txt", cwd=wt_B)
+        repo.git("commit", "-m", "B edits shared", cwd=wt_B)
+
+        monkeypatch.chdir(wt_B)
+        with pytest.raises(SystemExit):
+            cmd_rebase(_ns(target="T", yes=True))
+        assert _has_active_rebase(wt_B)
+
+        (wt_B / "shared.txt").write_text("resolved")
+        repo.git("add", "shared.txt", cwd=wt_B)
+
+        monkeypatch.chdir(repo.work)
+        with pytest.raises(SystemExit) as exc:
+            cmd_rebase(_ns(target="main", branch="B", yes=True))
+
+        assert exc.value.code == 4
+        assert "git tree propagate B" in exc.value.message
+        assert _has_active_rebase(wt_B)  # left alone
+        assert discover().parent_of["B"] == "T"  # not reparented onto main
+        assert "B edits shared" in repo.git("log", "--oneline", "B")  # commit not skipped away
+
+    def test_foreign_mid_rebase_is_not_sent_to_propagate(
+        self, repo: RepoHelper, monkeypatch, tmp_path
+    ) -> None:
+        """`propagate` refuses a rebase git-tree did not start, so advising it would dead-end."""
+        repo.commit("shared.txt", "original", "base shared")
+        repo.git("branch", "U", "main")
+        repo.checkout("U")
+        repo.commit("shared.txt", "U version", "U edits shared")  # diverges, so B will conflict
+        repo.checkout("main")
+
+        repo.branch("B", parent="main")
+        wt_B = repo.worktree("B", str(tmp_path / "wt-B"))
+        (wt_B / "shared.txt").write_text("B version")
+        repo.git("add", "shared.txt", cwd=wt_B)
+        repo.git("commit", "-m", "B edits shared", cwd=wt_B)
+        repo.git("rebase", "U", cwd=wt_B, check=False)  # hand-started, conflicts
+        assert _has_active_rebase(wt_B)
+
+        with pytest.raises(SystemExit) as exc:
+            cmd_rebase(_ns(target="main", branch="B", yes=True))
+
+        assert exc.value.code == 4
+        assert "git rebase --abort" in exc.value.message
+        assert "propagate" not in exc.value.message
+
+    def test_nonexistent_branch_is_named_as_such(self, repo: RepoHelper) -> None:
+        with pytest.raises(SystemExit) as exc:
+            cmd_rebase(_ns(target="main", branch="nope", yes=True))
+        assert exc.value.code == 4
+        assert "No such branch" in exc.value.message
+
+    def test_branch_outside_the_tree_exits_5(self, repo: RepoHelper) -> None:
+        repo.git("branch", "loose", "main")  # a real branch, but no tree-parent
+        with pytest.raises(SystemExit) as exc:
+            cmd_rebase(_ns(target="main", branch="loose", yes=True))
+        assert exc.value.code == 5
 
 
 class TestRebaseResumeViaPropagate:

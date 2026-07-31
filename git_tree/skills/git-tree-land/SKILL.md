@@ -40,11 +40,10 @@ absent from the parent, which is to say it is gone.
 
 ## 3. Rebase each child onto the parent
 
-`git tree rebase` takes no branch argument. It acts on the current branch, so run it from each
-child's own worktree, once per direct child:
+Name the child as the second argument, so this runs from anywhere, once per direct child:
 
 ```sh
-cd <child-worktree> && git tree rebase <parent> -y
+git tree rebase <parent> <child> -y
 ```
 
 The target must be a local branch. `origin/main`, a tag, or a raw commit is refused. Order among

@@ -1923,22 +1923,29 @@ def cmd_propagate(args: argparse.Namespace) -> None:
 
 
 def cmd_rebase(args: argparse.Namespace) -> None:
-    try:
-        branch = current_branch()
-    except TreeError:
-        # A detached HEAD here usually means a prior `git tree rebase` conflicted and left this
-        # worktree mid-rebase. Rebase is never the resume verb, so point at the propagate that is
-        # (naming the stuck branch). `git_ok` guards the non-repo case so we don't mask its error.
-        cwd = Path.cwd()
-        if git_ok("rev-parse", "--git-dir", cwd=cwd) and _has_active_rebase(cwd):
-            stuck = _active_rebase_branch(cwd)
-            hint = f"git tree propagate {stuck}" if stuck else "git tree propagate <branch>"
-            raise TreeError(
-                "This worktree is mid-rebase from an earlier `git tree rebase`. Resolve the "
-                f"conflicts and `git add`, then resume with: {hint}",
-                code=4,
-            ) from None
-        raise
+    if args.branch is not None:
+        branch = args.branch
+        # Naming a branch that doesn't exist would otherwise surface as "no tree-parent-branch
+        # configured", which reads as a tree problem rather than the typo it is.
+        if not git_ok("rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"):
+            raise TreeError(f"No such branch: {branch}", code=4)
+    else:
+        try:
+            branch = current_branch()
+        except TreeError:
+            # A detached HEAD here usually means a prior `git tree rebase` conflicted and left this
+            # worktree mid-rebase. Rebase is never the resume verb, so point at the propagate that
+            # is (naming the stuck branch). `git_ok` guards the non-repo case so we don't mask it.
+            cwd = Path.cwd()
+            if git_ok("rev-parse", "--git-dir", cwd=cwd) and _has_active_rebase(cwd):
+                stuck = _active_rebase_branch(cwd)
+                hint = f"git tree propagate {stuck}" if stuck else "git tree propagate <branch>"
+                raise TreeError(
+                    "This worktree is mid-rebase from an earlier `git tree rebase`. Resolve the "
+                    f"conflicts and `git add`, then resume with: {hint}",
+                    code=4,
+                ) from None
+            raise
     target: str = args.target
     graph = discover()
     resume_cmd = _resume_cmd(branch)
@@ -1981,6 +1988,30 @@ def cmd_rebase(args: argparse.Namespace) -> None:
             f"{branch} needs a worktree. Add one with: git worktree add <path> {branch}",
             code=4,
         )
+    # Naming a branch reaches a state the current-branch form cannot: a mid-rebase worktree has a
+    # detached HEAD, so `current_branch()` fails there and the hint above fires instead. Reached by
+    # name, the reparent below would commit and the rebase would then drive the in-progress rebase
+    # to completion, `--skip`ping past the very commits being replayed. `_require_clean_state` does
+    # not cover this: it admits a resolved git-tree mid-rebase as a resume point, by design.
+    if _has_active_rebase(info.worktree):
+        actual_onto = _active_rebase_onto(info.worktree)
+        ours = bool(
+            old_parent
+            and actual_onto
+            and git_ok("merge-base", "--is-ancestor", actual_onto, old_parent)
+        )
+        # Same split as `_require_clean_state`: git-tree's own rebase resumes, a foreign one is
+        # not ours to drive, and pointing the second case at `propagate` would only dead-end.
+        fix = (
+            f"resolve the conflicts and `git add` them, then run: {' '.join(resume_cmd)}"
+            if ours
+            else "finish it or `git rebase --abort` first"
+        )
+        raise TreeError(
+            f"{branch} is mid-rebase in {info.worktree}; rebase is not the resume verb. {fix}",
+            code=4,
+        )
+
     _require_healthy_submodules([branch], graph)
     _require_clean_state([branch], graph, resume_cmd)
     if descendants:
@@ -2886,11 +2917,15 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     rebase_p = sub.add_parser(
-        "rebase", help="Rebase current branch + descendants onto new base", parents=[common]
+        "rebase", help="Rebase a branch + descendants onto new base", parents=[common]
     )
     rebase_p.set_defaults(func=cmd_rebase)
     _set_completer(
         rebase_p.add_argument("target", help="Branch or ref to rebase onto"), "git_heads"
+    )
+    _set_completer(
+        rebase_p.add_argument("branch", nargs="?", help="Branch to rebase (default: current)"),
+        "git_heads",
     )
     rebase_p.add_argument("--dry-run", action="store_true", help="Show what would be done")
     rebase_p.add_argument(

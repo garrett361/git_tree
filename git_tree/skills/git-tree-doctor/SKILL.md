@@ -24,14 +24,17 @@ The configured parent no longer exists, so the edge was dropped. **Repair the ed
 `git tree rebase` cannot do it: it reads the configured old parent straight from git config and
 fails with `Old parent <name> does not exist.` before touching anything.
 
-Ask which branch it should hang from, then from that branch's own worktree:
+Ask which branch it should hang from, then repair the edge:
 
-- `git tree attach <new-parent>` to record the edge. This rewrites no history, so it is correct
-  whether or not the branch already sits on that parent.
-- `git tree detach <branch> -y` instead, to leave it as its own root.
+- `git tree attach <new-parent>` records the edge, rewriting no history, so it is correct whether
+  or not the branch already sits on that parent. This one acts on the **current** branch, so run
+  it from that branch's own worktree.
+- `git tree detach <branch> -y` instead, to leave it as its own root. It names its branch, so it
+  runs from anywhere.
 
-If the commits also need to move onto the new parent, run `git tree rebase <new-parent> -y` as a
-second step, *after* `attach` has repaired the edge.
+If the commits also need to move onto the new parent, run
+`git tree rebase <new-parent> <branch> -y` as a second step, *after* `attach` has repaired the
+edge. That one names its branch too.
 
 ## `cyclic: true`, non-empty `cycles`
 
