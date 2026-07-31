@@ -75,10 +75,16 @@ git tree rebuild <branch> -y
 ```
 
 This deletes and recreates the worktree from the branch tip, keeping the branch ref and tree
-config, then re-initializes submodules. **Uncommitted work in that worktree is lost**, which is
-why it refuses on a dirty worktree, on one it cannot read at all, or on one with a rebase in
-progress. Confirm with the user before using `--force`. It also refuses if your shell is inside
-the target worktree, so `cd` out first.
+config, then re-initializes submodules. **Uncommitted work in that worktree is lost**, so it
+refuses rather than delete something it cannot account for. It refuses when the worktree is
+dirty, when a submodule holds uncommitted content (including a populated directory that was
+never initialized, or a `.gitmodules` it cannot parse), when a rebase is in progress, and when
+it cannot read the worktree at all.
+
+Each refusal names what it found. Treat it as a question for the user, not an obstacle: look in
+the named path, rescue anything they want, and only then re-run with `--force`, which destroys
+exactly what the refusal described. It also refuses if your shell is inside the target worktree,
+so `cd` out first.
 
 ## `rebase_in_progress: true`
 

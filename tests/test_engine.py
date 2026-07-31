@@ -64,3 +64,33 @@ class TestRebaseFailureReported:
 
         # b was not actually moved onto main (the rebase was rejected).
         assert "advance main" not in repo.git("log", "--oneline", "b")
+
+    def test_stash_is_named_when_the_rebase_never_starts(
+        self, repo: RepoHelper, monkeypatch, tmp_path, capsys
+    ) -> None:
+        """A rebase rejected before it starts leaves the auto-stash with nothing to pop it.
+
+        `_conflict_exit` names the stash, but this path raises earlier and used to say nothing,
+        so the worktree just looked mysteriously clean and the work sat in a stash the user had
+        no reason to look for.
+        """
+        repo.git("branch", "b", "main")
+        repo.set_parent("b", "main")
+        wt_b = repo.worktree("b", str(tmp_path / "wt-b"))
+        _commit_in(repo, wt_b, "b1.txt", "b1", "b commit")
+        repo.checkout("main")
+        repo.commit("m2.txt", "m2", "advance main")
+
+        (wt_b / "b1.txt").write_text("UNCOMMITTED WORK")  # gets stashed before the rebase
+
+        hook = repo.work / ".git" / "hooks" / "pre-rebase"
+        hook.write_text("#!/bin/sh\nexit 1\n")
+        hook.chmod(0o755)
+
+        monkeypatch.setattr("builtins.input", lambda _: "y")
+        with pytest.raises(SystemExit):
+            cmd_propagate(_ns(branch="main"))
+
+        stash = repo.git("rev-parse", "refs/stash")
+        assert stash  # the work is recoverable...
+        assert stash in capsys.readouterr().err  # ...and the error says exactly where

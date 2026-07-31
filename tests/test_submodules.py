@@ -593,13 +593,13 @@ class TestRebuildCwdGuard:
 
 
 class TestRebuildCorruptedGitStatus:
-    """Coverage gap #10: cmd_rebuild proceeds without --force when git status crashes."""
+    """A worktree rebuild cannot inspect is one it refuses to delete without --force."""
 
     def test_rebuild_refuses_when_git_status_crashes(self, repo: RepoHelper, tmp_path) -> None:
         """A worktree too broken to inspect is not a worktree that is safe to delete.
 
         Rebuild removes the directory outright, so "cannot prove it is clean" must not read as
-        "is clean" — the same posture `remove` takes. `--force` is the way through, once the user
+        "is clean", which is the posture `remove` takes. `--force` is the way through, once the user
         has rescued anything they need.
         """
         repo.branch("child", parent="main")

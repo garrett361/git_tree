@@ -1053,10 +1053,12 @@ def cmd_detach(args: argparse.Namespace) -> None:
     if not _proceed(args, "Proceed?"):
         return
 
-    # A tree's remote is anchored on its root, so `branch` needs one before it becomes a root.
-    # Read the old root first: unsetting the config below is what severs the path to it. This
-    # copies rather than moves, so the tree left behind keeps its own anchor.
-    _carry_remote_to_root(root_of(graph, branch), branch)
+    # A tree's remote is anchored on its root, so `branch` needs one when it becomes a root of
+    # something. Only when it has children: `branch.<name>.remote` is git's own key, not a
+    # git-tree one, so writing it on a branch that is leaving the tree entirely would retarget
+    # plain `git push`. Read the old root before unsetting the config that leads to it.
+    if children:
+        _carry_remote_to_root(root_of(graph, branch), branch)
     _unset_tree_config(branch)
     print(f"Detached {branch} (was child of {parent})")
 
@@ -1251,7 +1253,7 @@ def cmd_remove(args: argparse.Namespace) -> None:
             for b in subtree
             if (info := graph.branches.get(b))
             and info.worktree
-            and _remove_blocking_dirt(info.worktree)
+            and (_remove_blocking_dirt(info.worktree) or _has_active_rebase_safe(info.worktree))
         ]
         if late:
             raise TreeError(
@@ -1364,12 +1366,17 @@ def cmd_rebuild(args: argparse.Namespace) -> None:
     # Same gate `remove` uses, not a bare `git status`: that misses submodule dirt whenever
     # .gitmodules carries `ignore = all`, and misses a populated-but-uninitialized submodule
     # directory entirely. Both are real content, and rebuild deletes the worktree.
-    # Two ways the gate can fail, and they deserve opposite answers. If the worktree's own status
-    # fails we cannot see the worktree at all, so refuse rather than delete it blind. If only the
-    # submodule walk fails, that IS the corruption rebuild repairs, so warn and continue —
-    # refusing there would make --force mandatory for rebuild's whole reason to exist.
+    #
+    # Read the worktree's own state first, with submodules excluded so a corrupted one cannot
+    # make this fail. It answers two questions. If it cannot run at all, nothing here is
+    # inspectable, so refuse rather than delete blind. If the fuller gate below then fails, that
+    # failure is the submodule corruption rebuild exists to repair, so fall back to this answer
+    # instead of refusing: demanding --force there would demand it for rebuild's whole purpose.
+    own_dirt: bool | None = None
     try:
-        _worktree_status(wt_path, ignore_submodules="all")
+        own_dirt = _worktree_status(
+            wt_path, ignore_submodules="all", untracked_files="normal"
+        ).dirty
     except subprocess.CalledProcessError as err:
         if not force:
             raise TreeError(
@@ -1382,10 +1389,11 @@ def cmd_rebuild(args: argparse.Namespace) -> None:
         blocked = _remove_blocking_dirt(wt_path)
     except subprocess.CalledProcessError:
         print(
-            f"Warning: could not inspect submodules under {wt_path}; rebuilding anyway.",
+            f"Warning: could not inspect submodules under {wt_path}; "
+            f"checking the worktree itself only.",
             file=sys.stderr,
         )
-        blocked = False
+        blocked = bool(own_dirt)
     if blocked and not force:
         raise TreeError(
             f"{target} has uncommitted changes in {wt_path} (possibly inside a submodule).\n"
@@ -1451,20 +1459,31 @@ def _replay_is_empty(cwd: Path) -> bool:
     return git_ok("diff", "--quiet", "HEAD", cwd=cwd)
 
 
-def _refuse_unfinished_replay(branch: str, cwd: Path, resume_cmd: list[str]) -> NoReturn:
+def _refuse_unfinished_replay(
+    branch: str, cwd: Path, stash: str | None, resume_cmd: list[str]
+) -> NoReturn:
     """The rebase stopped with no conflict but with changes present, so it cannot be skipped."""
     files = git_lines("diff", "--name-only", "HEAD", cwd=cwd)
-    listed = "".join(f"\n  {f}" for f in files)
+    lines = [
+        f"{branch}'s rebase in {cwd} is stopped with changes that are not a conflict:",
+        *(f"  {f}" for f in files),
+        "`git rebase --skip` would discard them. Move them out of the way with "
+        "`git stash push` (not `git add`, which folds them into the commit being replayed),",
+        f"then re-run: {' '.join(resume_cmd)}",
+    ]
+    if stash:
+        lines.append(f"An earlier stash from this run is also waiting: git stash apply {stash}")
     raise TreeError(
-        f"{branch}'s rebase in {cwd} is stopped with changes that are not a conflict:{listed}\n"
-        f"`git rebase --skip` would discard them. Commit or stash them (do not `git add` them, "
-        f"that folds them into the commit being replayed), then re-run: {' '.join(resume_cmd)}",
+        "\n".join(lines),
         code=4,
         branches=[branch],
+        remedy=list(resume_cmd),
     )
 
 
-def _skip_empty_commits(cwd: Path, branch: str, resume_cmd: list[str]) -> str | None:
+def _skip_empty_commits(
+    cwd: Path, branch: str, stash: str | None, resume_cmd: list[str]
+) -> str | None:
     """Loop --skip until rebase finishes or a real conflict appears. Returns None if
     a real conflict was hit (rebase left in progress for the user to resolve).
 
@@ -1476,7 +1495,7 @@ def _skip_empty_commits(cwd: Path, branch: str, resume_cmd: list[str]) -> str | 
         if _has_unmerged(cwd):
             return None  # real conflict; leave rebase in progress
         if not _replay_is_empty(cwd):
-            _refuse_unfinished_replay(branch, cwd, resume_cmd)
+            _refuse_unfinished_replay(branch, cwd, stash, resume_cmd)
         if not git_echo_ok("rebase", "--skip", cwd=cwd):
             return None  # --skip surfaced a conflict / can't proceed; hand to user
     return "ok (skipped empty)"
@@ -1505,9 +1524,16 @@ def _rebase_onto(
     # -c rebase.updateRefs=false: with the user's rebase.updateRefs on, a rebase also relocates
     # any *other* local branch sitting on a commit in the replayed range. git-tree moves refs only
     # through its own propagate, so it opts out and touches just the branch it is rebasing.
+    # autoSquash/rebaseMerges are opted out for a second reason: they put non-`pick` verbs
+    # (`fixup`, `label`, `merge`) in the todo, which is how `_is_interactive_rebase` recognises a
+    # rebase as the user's. Inheriting them would make git-tree refuse to resume its own cascade.
     result = git_echo(
         "-c",
         "rebase.updateRefs=false",
+        "-c",
+        "rebase.autoSquash=false",
+        "-c",
+        "rebase.rebaseMerges=false",
         *rr,
         "rebase",
         "--no-reapply-cherry-picks",
@@ -1530,7 +1556,7 @@ def _rebase_onto(
         # rebase never started, so nothing pops it, and the worktree just looks mysteriously
         # clean until the user goes looking.
         note = (
-            f"\nYour uncommitted changes were stashed first — restore them with: "
+            f"\nYour uncommitted changes were stashed first; restore them with: "
             f"cd {cwd} && git stash apply {stash}"
             if stash
             else ""
@@ -1553,7 +1579,7 @@ def _drive_conflicted_rebase(
     replay recorded resolutions (`rerere`), stage them, and `--continue` until it finishes;
     otherwise stop for the user via `_conflict_exit`. Returns a status string on completion."""
     if not _has_unmerged(cwd):
-        status = _skip_empty_commits(cwd, child, resume_cmd)
+        status = _skip_empty_commits(cwd, child, stash, resume_cmd)
         if status is not None:
             return status
         _conflict_exit(child, parent, cwd, stash, resume_cmd)
@@ -1579,7 +1605,7 @@ def _drive_conflicted_rebase(
 
         # --continue stopped again — new conflict or empty patch?
         if not _has_unmerged(cwd):
-            status = _skip_empty_commits(cwd, child, resume_cmd)
+            status = _skip_empty_commits(cwd, child, stash, resume_cmd)
             if status is not None:
                 return "ok (rerere)"
             _conflict_exit(child, parent, cwd, stash, resume_cmd)
@@ -1605,7 +1631,7 @@ def _conflict_exit(
         # By SHA, not `stash@{0}`: `refs/stash` is shared across the repo's worktrees, so that
         # index can point at another worktree's entry by the time this is read.
         lines.append(
-            f"Note: dirty worktree was stashed — after resuming, run: "
+            f"Note: dirty worktree was stashed; after resuming, run: "
             f"cd {cwd} && git stash apply {stash}"
         )
     raise ConflictError(
@@ -1706,6 +1732,10 @@ def _is_interactive_rebase(cwd: Path) -> bool:
     refuse every cascade. Two things do tell them apart. `amend` exists only while stopped at an
     `edit` or `reword`. And git-tree's todo is machine-generated, so every verb in it is `pick`;
     any other verb was typed by a person.
+
+    Known blind spot: a `git rebase -i` whose todo the user left as all `pick`s (reordered or
+    trimmed only) is indistinguishable from git-tree's own. Driving that one forward carries out
+    the user's own instructions, so it fails in the harmless direction.
     """
     if _rebase_state_file(cwd, "amend") is not None:
         return True
@@ -1884,7 +1914,14 @@ def _require_healthy_submodules(branches: list[str], graph: Graph) -> None:
         info = graph.branches.get(b)
         if not info or not info.worktree:
             continue
-        for sub_path in _submodule_paths(info.worktree):
+        try:
+            sub_paths = _submodule_paths(info.worktree)
+        except TreeError:
+            # Unlike the removal gate, nothing here is about to delete anything, so an
+            # unreadable .gitmodules is not worth blocking a cascade over. The rebase itself
+            # will surface any real submodule problem.
+            continue
+        for sub_path in sub_paths:
             if not _check_submodule_health(info.worktree, sub_path):
                 unhealthy.append((b, sub_path))
     if not unhealthy:
@@ -2197,14 +2234,9 @@ def cmd_rebase(args: argparse.Namespace) -> None:
     # to completion, `--skip`ping past the very commits being replayed. `_require_clean_state` does
     # not cover this: it admits a resolved git-tree mid-rebase as a resume point, by design.
     if _has_active_rebase(info.worktree):
-        actual_onto = _active_rebase_onto(info.worktree)
-        ours = bool(
-            old_parent
-            and actual_onto
-            and git_ok("merge-base", "--is-ancestor", actual_onto, old_parent)
-        )
-        # Same split as `_require_clean_state`: git-tree's own rebase resumes, a foreign one is
-        # not ours to drive, and pointing the second case at `propagate` would only dead-end.
+        # Same predicate the cascade uses, so the advice below cannot send the user to a
+        # `propagate` that then refuses this very worktree as foreign.
+        ours = _is_git_tree_rebase(info.worktree, old_parent)
         fix = (
             f"resolve the conflicts and `git add` them, then run: {' '.join(resume_cmd)}"
             if ours

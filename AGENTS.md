@@ -72,7 +72,7 @@ Single module: `git_tree/cli.py`. All commands, git helpers, graph discovery, an
 - `discover()`: reads worktree list + git config to build the graph
 
 **Submodule awareness** (helpers near `_require_clean_state`):
-- `_submodule_paths(worktree)`: parses `.gitmodules` via `configparser`, returns paths that exist on disk.
+- `_submodule_paths(worktree)`: parses `.gitmodules` via `configparser`, returns paths that exist on disk. Raises `TreeError` when the file cannot be parsed (git accepts things `configparser` rejects, e.g. a repeated `[submodule "x"]`); callers deciding whether deleting is safe must treat that as "cannot prove clean" rather than "no submodules".
 - `_check_submodule_health(worktree, submodule_path)`: resolves `.git` file → gitdir target → checks HEAD exists. Never shells out (the submodule may be corrupted).
 - `_require_healthy_submodules(branches, graph)`: pre-flight gate in `propagate`/`rebase`. Must run BEFORE `_require_clean_state` (`git status` crashes on corrupted submodules).
 - `_init_submodules(worktree)`: runs `git submodule update --init --recursive` via `git_echo_ok`.

@@ -78,7 +78,16 @@ Confirm `pending_from_parent` is 0 for the branches you touched.
 ## Refusals
 
 - `kind=unresolved_conflicts`: files still conflicted, or resolved but not `git add`ed.
+- `stopped with changes that are not a conflict`: the most likely one to hit on a resume. The
+  conflict is resolved and staged, but some other tracked file in that worktree is modified and
+  unstaged, so git refuses to continue and skipping would discard it. Run `git stash push` in
+  that worktree, then re-run the resume. Do **not** `git add` those files: that folds unrelated
+  work into the commit being replayed. The message lists the files.
+- `an operation in progress that rebasing would discard`: a merge, cherry-pick, or revert is
+  half-done in that worktree. Finish or abort it there, then re-run. Note this fires even when
+  the user has already staged their resolutions, which is why nothing else caught it.
 - `a rebase not started by git-tree is in progress`: git-tree will not drive a hand-started
-  rebase. Finish it or `git rebase --abort` in that worktree, then re-run.
+  rebase, including a `git rebase -i` stopped at an `edit`. Finish it or `git rebase --abort` in
+  that worktree, then re-run.
 - `These branches have corrupted submodule state`: follow the `git-tree-doctor` skill.
 - `These branches need worktrees`: `git worktree add <path> <branch>` for each, then re-run.

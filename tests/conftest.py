@@ -114,7 +114,7 @@ class RepoHelper:
         )
         env = {
             **os.environ,
-            "GIT_SEQUENCE_EDITOR": f"{sys.executable} -c {shlex.quote(rewrite)}",
+            "GIT_SEQUENCE_EDITOR": f"{shlex.quote(sys.executable)} -c {shlex.quote(rewrite)}",
             "GIT_EDITOR": "true",
         }
         _git("rebase", "-i", onto, cwd=worktree, check=False, env=env)
