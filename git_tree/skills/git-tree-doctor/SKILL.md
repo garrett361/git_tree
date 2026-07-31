@@ -76,8 +76,9 @@ git tree rebuild <branch> -y
 
 This deletes and recreates the worktree from the branch tip, keeping the branch ref and tree
 config, then re-initializes submodules. **Uncommitted work in that worktree is lost**, which is
-why it refuses on a dirty worktree without `--force`. Confirm with the user before using `--force`.
-It also refuses if your shell is inside the target worktree, so `cd` out first.
+why it refuses on a dirty worktree, on one it cannot read at all, or on one with a rebase in
+progress. Confirm with the user before using `--force`. It also refuses if your shell is inside
+the target worktree, so `cd` out first.
 
 ## `rebase_in_progress: true`
 

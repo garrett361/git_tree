@@ -100,6 +100,19 @@ class RepoHelper:
         self.git("config", "rerere.enabled", "true")
         self.git("config", "core.editor", "true")
 
+    def stop_rebase_clean(self, worktree: Path, onto: str, filename: str) -> None:
+        """Leave `worktree` mid-rebase onto `onto` with a clean `git status`.
+
+        Rebase until `filename` conflicts, then resolve it to the base's own version and stage
+        it, so the index matches HEAD and `git status --porcelain` is empty while `rebase-merge/`
+        survives with a correct `onto`. Interactive `break`/`edit` stops would be the other way
+        to reach this state, but they need a sequence editor and set `amend`/non-`pick` markers.
+        """
+        self.git("-c", "core.editor=true", "rebase", onto, cwd=worktree, check=False)
+        self.git("checkout", "--ours", "--", filename, cwd=worktree)
+        self.git("add", filename, cwd=worktree)
+        assert not self.git("status", "--porcelain", cwd=worktree), "expected a clean stop"
+
 
 @pytest.fixture(scope="session")
 def _git_global_config(tmp_path_factory: pytest.TempPathFactory) -> Path:

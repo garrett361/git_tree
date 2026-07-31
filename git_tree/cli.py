@@ -1162,6 +1162,28 @@ def cmd_remove(args: argparse.Namespace) -> None:
     except (OSError, ValueError):
         pass  # cwd resolution failed; proceed
 
+    # A stopped rebase is usually dirty, so the gate below caught this by accident rather than on
+    # purpose. It stops at a clean point often enough to matter (an --exec failure, git-tree's own
+    # empty-patch stop), and then the worktree holds the only reference to every conflict already
+    # resolved in that rebase: the branch ref hasn't moved, so the work lives on the detached HEAD
+    # and in the worktree's own HEAD reflog, both of which go with the directory.
+    mid_rebase = [
+        b
+        for b in subtree
+        if (info := graph.branches.get(b))
+        and info.worktree
+        and _has_active_rebase_safe(info.worktree)
+    ]
+    if mid_rebase and not force:
+        raise TreeError(
+            "Refusing to remove: a rebase is in progress in:\n"
+            + "\n".join(f"  {b}  ({graph.branches[b].worktree})" for b in mid_rebase)
+            + "\n\nFinish it (`git tree propagate <branch>`) or `git rebase --abort` there, or "
+            "re-run with --force to discard it. Nothing was removed.",
+            code=4,
+            branches=mid_rebase,
+        )
+
     # Safety gate (all-or-nothing): worktrees are force-removed, so uncommitted work (in the
     # worktree OR any submodule at any depth) is at risk. Refuse unless --force. Branch refs are
     # kept, so committed work is never at risk.
@@ -1189,6 +1211,10 @@ def cmd_remove(args: argparse.Namespace) -> None:
     if dirty:  # implies force
         print("\nWarning: --force will destroy uncommitted changes (and any git-ignored files) in:")
         for b in dirty:
+            print(f"  {b}  ({graph.branches[b].worktree})")
+    if mid_rebase:  # implies force
+        print("\nWarning: --force will discard the rebase in progress in:")
+        for b in mid_rebase:
             print(f"  {b}  ({graph.branches[b].worktree})")
     print()
     if args.dry_run:
@@ -1305,17 +1331,47 @@ def cmd_rebuild(args: argparse.Namespace) -> None:
     except (OSError, ValueError):
         pass  # cwd resolution failed; proceed anyway
 
-    # Dirty check: if git status works and shows changes, require --force
     force = args.force
+    if not force and _has_active_rebase_safe(wt_path):
+        raise TreeError(
+            f"{target} has a rebase in progress in {wt_path}. Rebuilding discards it, along with "
+            f"every conflict already resolved in it (the branch ref has not moved, so that work "
+            f"exists only in this worktree).\nFinish it (`git tree propagate {target}`) or "
+            f"`git rebase --abort` there, or re-run with --force.",
+            code=4,
+        )
+
+    # Same gate `remove` uses, not a bare `git status`: that misses submodule dirt whenever
+    # .gitmodules carries `ignore = all`, and misses a populated-but-uninitialized submodule
+    # directory entirely. Both are real content, and rebuild deletes the worktree.
+    # Two ways the gate can fail, and they deserve opposite answers. If the worktree's own status
+    # fails we cannot see the worktree at all, so refuse rather than delete it blind. If only the
+    # submodule walk fails, that IS the corruption rebuild repairs, so warn and continue —
+    # refusing there would make --force mandatory for rebuild's whole reason to exist.
     try:
-        if info.is_dirty and not force:
+        _worktree_status(wt_path, ignore_submodules="all")
+    except subprocess.CalledProcessError as err:
+        if not force:
             raise TreeError(
-                f"{target} has uncommitted changes in {wt_path}.\n"
-                f"Pass --force to rebuild anyway (uncommitted work will be lost).",
+                f"Could not read {wt_path} at all (git status failed there), so git-tree cannot "
+                f"tell whether it holds uncommitted work.\nRescue anything you need from that "
+                f"directory, then re-run with --force.",
                 code=4,
-            )
+            ) from err
+    try:
+        blocked = _remove_blocking_dirt(wt_path)
     except subprocess.CalledProcessError:
-        pass  # worktree too corrupted for git status; nothing to salvage
+        print(
+            f"Warning: could not inspect submodules under {wt_path}; rebuilding anyway.",
+            file=sys.stderr,
+        )
+        blocked = False
+    if blocked and not force:
+        raise TreeError(
+            f"{target} has uncommitted changes in {wt_path} (possibly inside a submodule).\n"
+            f"Pass --force to rebuild anyway (uncommitted work will be lost).",
+            code=4,
+        )
 
     # The branch's committed .gitmodules is the reliable signal: the (possibly corrupted)
     # worktree may be missing files, but the recreated one checks out the branch tip.
@@ -1572,6 +1628,19 @@ def _active_rebase_branch(cwd: Path) -> str | None:
     if ref and ref.startswith("refs/heads/"):
         return ref.removeprefix("refs/heads/")
     return None
+
+
+def _has_active_rebase_safe(cwd: Path) -> bool:
+    """`_has_active_rebase`, but "cannot tell" answers no.
+
+    It resolves the gitdir via `git rev-parse`, which exits non-zero when the worktree's `.git`
+    pointer is broken or the directory is gone. Those are exactly the worktrees `rebuild` exists
+    to repair, so a gate built on this must not turn them into a hard error.
+    """
+    try:
+        return _has_active_rebase(cwd)
+    except (subprocess.CalledProcessError, OSError):
+        return False
 
 
 def _is_git_tree_rebase(cwd: Path, parent: str | None) -> bool:

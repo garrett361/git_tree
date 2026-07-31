@@ -209,3 +209,42 @@ class TestRemove:
         with pytest.raises(SystemExit):
             cmd_remove(_ns())
         assert "A" in discover().parent_of  # nothing removed
+
+
+class TestRemoveMidRebase:
+    """A worktree mid-rebase holds the only reference to work already replayed.
+
+    The branch ref does not move until a rebase completes, so committed branch work is safe;
+    what dies with the worktree is every conflict already resolved for earlier commits, which
+    lives on the detached HEAD and in `.git/worktrees/<id>/logs/HEAD`, plus the tree config the
+    documented resume needs. The dirty gate caught this only by accident, because a stopped
+    rebase is usually dirty.
+    """
+
+    def _stopped(self, repo: RepoHelper, tmp_path):
+        repo.commit("shared.txt", "base", "base shared")
+        repo.branch("A", parent="main")
+        wt = repo.worktree("A", str(tmp_path / "wt-A"))
+        (wt / "shared.txt").write_text("A version")
+        repo.git("add", "shared.txt", cwd=wt)
+        repo.git("commit", "-m", "A edits shared", cwd=wt)
+        repo.checkout("main")
+        repo.commit("shared.txt", "main version", "main edits shared")
+        repo.stop_rebase_clean(wt, "main", "shared.txt")
+        return wt
+
+    def test_refuses_and_leaves_the_rebase_intact(self, repo: RepoHelper, tmp_path, capsys) -> None:
+        wt = self._stopped(repo, tmp_path)
+        with pytest.raises(TreeError) as exc:
+            cmd_remove(_ns(branch="A", yes=True))
+
+        assert exc.value.code == 4
+        assert wt.exists()
+        assert (wt / ".git").exists()
+        assert "A" in discover().parent_of  # tree config intact, so a resume is still possible
+        assert "rebase" in capsys.readouterr().err.lower()
+
+    def test_force_still_removes(self, repo: RepoHelper, tmp_path) -> None:
+        wt = self._stopped(repo, tmp_path)
+        cmd_remove(cli_args(branch="A", yes=True, force=True))
+        assert not wt.exists()

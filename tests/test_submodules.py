@@ -595,16 +595,35 @@ class TestRebuildCwdGuard:
 class TestRebuildCorruptedGitStatus:
     """Coverage gap #10: cmd_rebuild proceeds without --force when git status crashes."""
 
-    def test_rebuild_proceeds_when_git_status_crashes(self, repo: RepoHelper, tmp_path) -> None:
+    def test_rebuild_refuses_when_git_status_crashes(self, repo: RepoHelper, tmp_path) -> None:
+        """A worktree too broken to inspect is not a worktree that is safe to delete.
+
+        Rebuild removes the directory outright, so "cannot prove it is clean" must not read as
+        "is clean" — the same posture `remove` takes. `--force` is the way through, once the user
+        has rescued anything they need.
+        """
         repo.branch("child", parent="main")
         wt = repo.worktree("child", str(tmp_path / "wt-child"))
+        (wt / "keepme.txt").write_text("uncommitted work git status cannot report")
 
         # Corrupt so git status fails (CalledProcessError)
         (wt / ".git").unlink()
         (wt / ".git").write_text("garbage\n")
 
-        # Should succeed without --force since git status crash is caught
-        cmd_rebuild(cli_args(branch="child", yes=True, force=False))
+        with pytest.raises(TreeError) as exc:
+            cmd_rebuild(cli_args(branch="child", yes=True, force=False))
+        assert exc.value.code == 4
+        assert (wt / "keepme.txt").exists()
+
+    def test_rebuild_force_proceeds_when_git_status_crashes(
+        self, repo: RepoHelper, tmp_path
+    ) -> None:
+        repo.branch("child", parent="main")
+        wt = repo.worktree("child", str(tmp_path / "wt-child"))
+        (wt / ".git").unlink()
+        (wt / ".git").write_text("garbage\n")
+
+        cmd_rebuild(cli_args(branch="child", yes=True, force=True))
         assert wt.exists()
         assert (wt / "init.txt").exists()
 
