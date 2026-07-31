@@ -24,9 +24,13 @@ def _commit(repo: RepoHelper, wt: Path, filename: str, content: str, message: st
 
 
 class TestSquashMergeCleanup:
-    """The AGENTS.md 'Squash-merge cleanup' protocol: after B is squash-merged into its
-    parent, rebase each of B's children onto that parent (from the child's worktree), then
-    drop the now-childless B. Uses only existing commands (rebase + continue + remove)."""
+    """The protocol shipped as `git_tree/skills/git-tree-land/SKILL.md`: after B is squash-merged
+    into its parent, rebase each of B's children onto that parent (from the child's worktree),
+    then drop the now-childless B. Uses only existing commands (rebase + continue + remove).
+
+    This is the only *semantic* guard on that skill: `tests/test_skills.py` checks that the
+    commands it names still parse, not that the procedure is still right. Change the ordering
+    rules here and the skill needs the same edit."""
 
     def test_fanout_children_hoisted_then_b_removed(
         self, repo: RepoHelper, monkeypatch, tmp_path

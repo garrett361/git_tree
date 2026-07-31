@@ -45,6 +45,16 @@ git tree manpage --install   # writes ~/.local/share/man/man1/git-tree.1
 
 Without it, `git tree --help` fails (git looks for a man page); use `git tree -h` or `git-tree --help` instead.
 
+### Agent skills
+
+git-tree bundles three [Agent Skills](https://agentskills.io) covering the workflows that are easiest to get wrong: cleaning up after a squash-merge, resolving a conflict mid-cascade, and repairing a broken tree. Install them once:
+
+```sh
+git tree skills --install   # links into ~/.claude/skills and ~/.agents/skills
+```
+
+They install at user scope, so they apply in every repo you use git-tree in, not just this one. Claude Code invokes them as `/git-tree-land`, `/git-tree-propagate`, `/git-tree-doctor`; Codex as `$git-tree-land` and so on; both also load them on their own when the task matches. `git tree skills` lists what is bundled and where it would go, and `--dir DIR` installs somewhere else. The install symlinks, so a `git pull` in an editable clone updates both harnesses with no reinstall, and re-running it repairs links left dangling by a moved clone. It refuses rather than overwriting anything at those paths that git-tree did not write.
+
 ## Usage
 
 ```sh
@@ -60,6 +70,7 @@ git tree rebase <target>               # reparent + rebase current branch onto <
 git tree split                         # split current branch into parent + child
 git tree push                          # push current branch + descendants (--force-with-lease)
 git tree log                           # show a git log graph across the whole tree
+git tree skills [--install]            # list the bundled agent skills; --install links them into your harnesses
 git tree manpage [--install]           # emit the man page (roff); --install writes it to the man path
 git tree completions <zsh|bash>        # emit the shell completion script
 git tree --version                     # print git-tree <version>
