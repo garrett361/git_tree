@@ -93,4 +93,33 @@ class TestRebaseFailureReported:
 
         stash = repo.git("rev-parse", "refs/stash")
         assert stash  # the work is recoverable...
-        assert stash in capsys.readouterr().err  # ...and the error says exactly where
+        # ...and the error says exactly how. `apply` rather than `pop`, and by SHA rather than
+        # `stash@{0}`, which can be another worktree's entry by the time anyone reads it.
+        assert f"git stash apply {stash}" in capsys.readouterr().err
+
+
+class TestStashAdviceOnConflict:
+    def test_conflict_exit_names_apply_and_the_stash_commit(
+        self, repo: RepoHelper, monkeypatch, tmp_path, capsys
+    ) -> None:
+        """The other site that quotes a stash to the user, reached when the rebase does start.
+
+        Nothing else asserts the advice text, so both sites could go back to `stash@{0}`, or to
+        `pop`, with the suite green.
+        """
+        repo.commit("shared.txt", "orig", "base shared")
+        repo.branch("b", parent="main")
+        wt_b = repo.worktree("b", str(tmp_path / "wt-b"))
+        _commit_in(repo, wt_b, "shared.txt", "b version", "b edits shared")
+        (wt_b / "init.txt").write_text("UNCOMMITTED WORK")  # tracked, so it gets stashed
+
+        repo.checkout("main")
+        repo.commit("shared.txt", "main version", "main edits shared")
+
+        monkeypatch.setattr("builtins.input", lambda _: "y")
+        with pytest.raises(SystemExit):
+            cmd_propagate(_ns(branch="main"))
+
+        stash = repo.git("rev-parse", "refs/stash")
+        assert stash
+        assert f"git stash apply {stash}" in capsys.readouterr().err

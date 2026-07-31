@@ -471,6 +471,92 @@ class TestNamedBranch:
             cmd_rebase(_ns(target="main", branch="loose", yes=True))
         assert exc.value.code == 5
 
+    @pytest.mark.xfail(
+        strict=True,
+        reason="the mid-rebase guard covers only the named branch, so a stopped descendant is "
+        "admitted, invalidated by the reparent, and then refused as foreign",
+    )
+    def test_mid_rebase_descendant_is_refused_before_anything_moves(
+        self, repo: RepoHelper, tmp_path
+    ) -> None:
+        """Rebasing a branch necessarily invalidates any rebase in progress below it.
+
+        `_require_clean_state` admits a resolved git-tree mid-rebase as a resume point, which is
+        right for `propagate` and wrong here: by the time the cascade reaches C, B has been
+        reparented and rewritten, so C's `onto` is no longer an ancestor of B and the run
+        dead-ends on "git-tree did not start it". That state cannot be reached again through
+        git-tree, and the advised `git rebase --abort` throws away C's resolution.
+        """
+        repo.commit("shared.txt", "base", "base shared")
+        repo.git("branch", "T", "main")
+        repo.set_parent("T", "main")
+        wt_T = repo.worktree("T", str(tmp_path / "wt-T"))
+        (wt_T / "t.txt").write_text("t")  # T must be ahead, or rebasing B onto it moves nothing
+        repo.git("add", "t.txt", cwd=wt_T)
+        repo.git("commit", "-m", "T adds t", cwd=wt_T)
+
+        repo.git("branch", "B", "main")
+        repo.set_parent("B", "main")
+        wt_B = repo.worktree("B", str(tmp_path / "wt-B"))
+        repo.git("branch", "C", "B")
+        repo.set_parent("C", "B")
+        wt_C = repo.worktree("C", str(tmp_path / "wt-C"))
+        (wt_C / "shared.txt").write_text("C version")
+        repo.git("add", "shared.txt", cwd=wt_C)
+        repo.git("commit", "-m", "C edits shared", cwd=wt_C)
+        # B advances after C forked, so C conflicts when replayed onto it.
+        (wt_B / "shared.txt").write_text("B version")
+        repo.git("add", "shared.txt", cwd=wt_B)
+        repo.git("commit", "-m", "B edits shared", cwd=wt_B)
+        repo.stop_rebase_clean(wt_C, "B", "shared.txt")
+        b_before = repo.git("rev-parse", "B")
+
+        with pytest.raises(TreeError) as exc:
+            cmd_rebase(_ns(target="T", branch="B", yes=True))
+
+        assert exc.value.code == 4
+        assert "C" in exc.value.message
+        assert discover().parent_of["B"] == "main"  # refused before the edge was rewritten
+        assert repo.git("rev-parse", "B") == b_before
+        assert _has_active_rebase(wt_C)
+
+
+class TestRebaseStashAdvice:
+    @pytest.mark.xfail(
+        strict=True,
+        reason="cmd_rebase still advises `git stash pop`, which errors after the failed pop and "
+        "names a `refs/stash` index shared with every other worktree",
+    )
+    def test_pop_conflict_advice_names_the_stash_commit(
+        self, repo: RepoHelper, tmp_path, capsys
+    ) -> None:
+        """The rest of the tool moved to `git stash apply <sha>`; this site did not.
+
+        Running the advised `git stash pop` after the pop already failed errors with `needs
+        merge`, and `stash@{0}` can point at another worktree's entry by the time it is read,
+        since `refs/stash` is repo-wide.
+        """
+        repo.commit("x.txt", "orig", "base with x")
+        repo.git("branch", "T", "main")
+        repo.set_parent("T", "main")
+        wt_T = repo.worktree("T", str(tmp_path / "wt-T"))
+        (wt_T / "x.txt").write_text("T version")
+        repo.git("add", "x.txt", cwd=wt_T)
+        repo.git("commit", "-m", "T changes x", cwd=wt_T)
+
+        repo.branch("b", parent="main")
+        wt_b = repo.worktree("b", str(tmp_path / "wt-b"))
+        (wt_b / "b1.txt").write_text("b1")
+        repo.git("add", "b1.txt", cwd=wt_b)
+        repo.git("commit", "-m", "b commit", cwd=wt_b)
+        (wt_b / "x.txt").write_text("b dirty")  # uncommitted, collides on pop
+
+        cmd_rebase(_ns(target="T", branch="b", yes=True))
+
+        err = capsys.readouterr().err
+        assert "git stash pop" not in err
+        assert f"git stash apply {repo.git('rev-parse', 'refs/stash')}" in err
+
 
 class TestRebaseResumeViaPropagate:
     """A `git tree rebase` conflict is resumed with `git tree propagate <branch>` (the reparent

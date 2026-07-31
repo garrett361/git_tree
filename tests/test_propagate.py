@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import shlex
 import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -675,14 +677,50 @@ class TestPropagateResumeScope:
         assert (wt_A1 / "a-only.txt").read_text() == "work in progress"
         assert _has_active_rebase(wt_A1)  # still resumable once the edit is dealt with
 
-        # The advice the error gives must actually work. It names the paths on purpose: a bare
-        # `git stash push` would take the staged resolution too, emptying the replay.
+        # Stashing only the unrelated path is safe, and leaves the replay intact.
         repo.git("stash", "push", "--", "a-only.txt", cwd=wt_A1)
         cmd_propagate(_ns(branch="A"))
 
         assert not _has_active_rebase(wt_A1)
         assert "A1 edits shared" in repo.git("log", "--oneline", "A1")
         assert (wt_A1 / "shared.txt").read_text() == "resolved"
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason="the advised stash pathspec is built from `git diff --name-only HEAD`, which "
+        "includes the staged resolution, so running it empties the replay",
+    )
+    def test_following_the_printed_advice_keeps_the_commit(self, repo: RepoHelper) -> None:
+        """The command the refusal prints has to be safe to run verbatim.
+
+        The test above stashes only the unrelated path, which is not what the tool tells you to
+        do. `propagate` is documented as the single runnable resume and `--json` ships the same
+        advice as a `remedy` argv, so an agent runs it with no human in the loop.
+        """
+        _wt_A, wt_A1, _wt_S = self._tree(repo, sibling_conflicts=False)
+        with pytest.raises(SystemExit):
+            cmd_propagate(_ns(branch="A", yes=True))
+
+        (wt_A1 / "shared.txt").write_text("resolved")
+        repo.git("add", "shared.txt", cwd=wt_A1)
+        (wt_A1 / "a-only.txt").write_text("work in progress")
+
+        with pytest.raises(SystemExit) as exc:
+            cmd_propagate(_ns(branch="A"))
+
+        # Take the command out of the message rather than hardcoding it, so this tracks whatever
+        # the tool actually advises.
+        advice = next((ln for ln in exc.value.message.splitlines() if "stash push" in ln), None)
+        assert advice, f"the refusal named no stash command:\n{exc.value.message}"
+        subprocess.run(
+            shlex.split(advice[advice.index("git ") :]),
+            cwd=wt_A1,
+            check=True,
+            capture_output=True,
+        )
+        cmd_propagate(_ns(branch="A"))
+
+        assert "A1 edits shared" in repo.git("log", "--oneline", "A1")
 
     def test_resume_covers_named_branch_whole_subtree(self, repo: RepoHelper) -> None:
         # Resuming `propagate R` finishes the stuck child AND propagates the other drifted child.
@@ -777,12 +815,20 @@ class TestPropagateResumeGuards:
         repo.git("add", "side.txt", cwd=wt_side)
         repo.git("commit", "-m", "side adds side", cwd=wt_side)
         repo.git("merge", "--no-commit", "--no-ff", "side", cwd=wt_A1, check=False)
-        assert (wt_A1 / ".git").exists()
+        merge_head = repo.git("rev-parse", "-q", "--verify", "MERGE_HEAD", cwd=wt_A1, check=False)
+        assert merge_head, "expected a merge in progress"
 
         with pytest.raises(TreeError) as exc:
             cmd_propagate(_ns(branch="A", yes=True))
 
         assert exc.value.code == 4
+        # The claim is that the merge survives, and only this asserts it. Staged resolutions show
+        # as `M `, and a stashed `side.txt` comes back on the pop, so the two checks below hold
+        # just as well on the path where the stash silently cleared MERGE_HEAD.
+        assert (
+            repo.git("rev-parse", "-q", "--verify", "MERGE_HEAD", cwd=wt_A1, check=False)
+            == merge_head
+        )
         assert "side.txt" in repo.git("status", "--porcelain", cwd=wt_A1)
 
     def test_hand_run_interactive_rebase_is_refused(self, repo: RepoHelper) -> None:
@@ -816,6 +862,9 @@ class TestPropagateResumeGuards:
             cmd_propagate(_ns(branch="A", yes=True))
 
         assert exc.value.code == 4
+        # Name the gate: a blanket "no rebase is ever git-tree's" regression, which would break
+        # every legitimate resume in the tool, would also satisfy a bare code check.
+        assert "not started by git-tree" in exc.value.message
         assert _has_active_rebase(wt_A1)  # still theirs to finish or abort
 
     def test_named_branch_mid_am_is_refused(self, repo: RepoHelper, tmp_path) -> None:
@@ -850,9 +899,27 @@ class TestPropagateResumeGuards:
         with pytest.raises(TreeError) as exc:
             cmd_propagate(_ns(branch="A", yes=True))
         assert exc.value.code == 4
+        # `_advance_branch`'s own wording, not `_require_clean_state`'s: the named branch must be
+        # refused by the gate that handles it directly.
+        assert "git-tree did not start it" in exc.value.message
         assert _has_active_rebase(wt_A)  # the am is left for the user to finish or abort
 
-    def test_resume_records_actual_replay_base_when_parent_moves(self, repo: RepoHelper) -> None:
+    @pytest.mark.xfail(
+        strict=True,
+        reason="the resume returns at the base the rebase began at instead of falling through to "
+        "the ordinary propagate step, so the child keeps drift the run should have removed",
+    )
+    def test_resume_leaves_the_child_on_the_live_parent(self, repo: RepoHelper) -> None:
+        """Committing to the parent while resolving a conflict is ordinary, and drift by itself is
+        legal. What is not legal is a `propagate` that exits ok having left drift it could remove.
+
+        The base the interrupted rebase replayed onto is the right thing to record when
+        `--continue` finishes: those commits really did land there, and naming the parent's newer
+        tip while the child sits below it would set an exclude boundary that swallows the child's
+        own commits on the next run. That value is an intermediate, though, not a terminal one.
+        Finishing the resume has to be followed by the branch's ordinary propagate step, which
+        lands it on the live parent and moves the fork with it.
+        """
         repo.commit("shared.txt", "original", "base")
         repo.git("branch", "A", "main")
         repo.set_parent("A", "main")
@@ -866,25 +933,56 @@ class TestPropagateResumeGuards:
         (wt_A1 / "shared.txt").write_text("A1 version")
         repo.git("add", "shared.txt", cwd=wt_A1)
         repo.git("commit", "-m", "A1 edits shared", cwd=wt_A1)
-        # Advance A so A1 (forked earlier) conflicts when propagated onto A.
         (wt_A / "shared.txt").write_text("A version 2")
         repo.git("add", "shared.txt", cwd=wt_A)
         repo.git("commit", "-m", "A edits shared again", cwd=wt_A)
-        a_at_conflict = repo.git("rev-parse", "A")
 
         with pytest.raises(SystemExit):
             cmd_propagate(_ns(branch="A", yes=True))
-        assert _has_active_rebase(wt_A1)  # A1 mid-rebase onto A@a_at_conflict
-        # Advance A FURTHER while A1 is stalled: the resume must finish onto the base the rebase
-        # actually targeted (a_at_conflict, now an ancestor of A) and record the fork there.
+        assert _has_active_rebase(wt_A1)
+
+        # The user fixes something on the parent while they are in there resolving.
         (wt_A / "later.txt").write_text("later")
         repo.git("add", "later.txt", cwd=wt_A)
-        repo.git("commit", "-m", "A advances further", cwd=wt_A)
-        assert repo.git("rev-parse", "A") != a_at_conflict
+        repo.git("commit", "-m", "A gains a fix during the conflict", cwd=wt_A)
 
         (wt_A1 / "shared.txt").write_text("resolved")
         repo.git("add", "shared.txt", cwd=wt_A1)
-        cmd_propagate(_ns(branch="A"))
+        cmd_propagate(_ns(branch="A"))  # returns ok today
 
         assert not _has_active_rebase(wt_A1)
-        assert repo.git("config", "branch.A1.tree-fork-commit") == a_at_conflict
+        # Both halves of "A1 is a child of A": the shape, and the boundary the next propagate
+        # replays from. A correct shape over a stale fork still misleads the following run.
+        assert "A gains a fix during the conflict" in repo.git("log", "--oneline", "A1")
+        assert repo.git("config", "branch.A1.tree-fork-commit") == repo.git("rev-parse", "A")
+        # Landing on the live parent must not cost A1 its own work: an exclude boundary set to
+        # the parent tip while A1 still sits below it would replay nothing.
+        assert "A1 edits shared" in repo.git("log", "--oneline", "A1")
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason="the refusal always says `not onto <parent>`, which is false when the rebase was "
+        "refused for being the user's own interactive session",
+    )
+    def test_interactive_refusal_does_not_misreport_the_base(self, repo: RepoHelper) -> None:
+        """A wrong reason sends the user to check something that is already correct.
+
+        `_advance_branch` has one message for two rejections. Here `onto` *is* the tree-parent and
+        the rebase was refused for being interactive, so the text names the wrong problem.
+        """
+        repo.commit("shared.txt", "base", "base")
+        repo.git("branch", "A", "main")
+        repo.set_parent("A", "main")
+        wt_A = repo.worktree("A")
+        (wt_A / "a.txt").write_text("a")
+        repo.git("add", "a.txt", cwd=wt_A)
+        repo.git("commit", "-m", "A adds a", cwd=wt_A)
+
+        repo.rebase_interactive(wt_A, "main", "edit")  # onto IS A's tree-parent
+        assert _has_active_rebase(wt_A)
+
+        with pytest.raises(TreeError) as exc:
+            cmd_propagate(_ns(branch="A", yes=True))
+
+        assert exc.value.code == 4
+        assert "not onto main" not in exc.value.message

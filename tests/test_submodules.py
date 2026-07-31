@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 from pathlib import Path
@@ -18,31 +19,17 @@ from git_tree.cli import (
     cmd_rebuild,
     cmd_remove,
     discover,
+    main,
 )
 
-from .conftest import RepoHelper, _git, cli_args
-
-
-def _add_submodule(repo: RepoHelper, name: str, tmp_path: Path) -> Path:
-    """Create a sub-repo and add it as a submodule. Returns submodule path in worktree."""
-    sub_repo = tmp_path / f"sub-{name}"
-    sub_repo.mkdir()
-    _git("init", cwd=sub_repo)
-    _git("config", "user.email", "test@test.com", cwd=sub_repo)
-    _git("config", "user.name", "Test", cwd=sub_repo)
-    (sub_repo / "readme.txt").write_text("sub content")
-    _git("add", "readme.txt", cwd=sub_repo)
-    _git("commit", "-m", "sub init", cwd=sub_repo)
-    # Allow file:// transport for submodule clone
-    repo.git("-c", "protocol.file.allow=always", "submodule", "add", str(sub_repo), name)
-    repo.git("commit", "-m", f"add submodule {name}")
-    return repo.work / name
-
-
-def _corrupt_submodule(worktree: Path, submodule_path: str) -> None:
-    """Corrupt a submodule's .git pointer so health check fails."""
-    dot_git = worktree / submodule_path / ".git"
-    dot_git.write_text("gitdir: /nonexistent/path/that/does/not/exist\n")
+from .conftest import (
+    RepoHelper,
+    _git,
+    add_submodule,
+    allow_file_protocol,
+    cli_args,
+    corrupt_submodule,
+)
 
 
 class TestRebuild:
@@ -52,16 +39,14 @@ class TestRebuild:
     def test_rebuild_recreates_worktree(
         self, repo: RepoHelper, tmp_path, monkeypatch, capsys
     ) -> None:
-        monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
-        monkeypatch.setenv("GIT_CONFIG_KEY_0", "protocol.file.allow")
-        monkeypatch.setenv("GIT_CONFIG_VALUE_0", "always")
+        allow_file_protocol(monkeypatch)
 
-        _add_submodule(repo, "mysub", tmp_path)
+        add_submodule(repo, "mysub", tmp_path)
         repo.branch("child", parent="main")
         wt = repo.worktree("child", str(tmp_path / "wt-child"))
         _git("submodule", "update", "--init", "--recursive", cwd=wt)
 
-        _corrupt_submodule(wt, "mysub")
+        corrupt_submodule(wt, "mysub")
 
         cmd_rebuild(self._ns("child"))
         assert wt.exists()
@@ -121,18 +106,12 @@ class TestRebuild:
         assert "git worktree add" in err and "child" in err
 
 
-def _allow_file_protocol(monkeypatch) -> None:
-    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
-    monkeypatch.setenv("GIT_CONFIG_KEY_0", "protocol.file.allow")
-    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "always")
-
-
 class TestRemoveSubmodule:
     """`git tree remove` force-removes worktrees git itself refuses to remove when they contain
     submodules, gated on a recursive dirty check with a `--force` override."""
 
     def _child_with_submodule(self, repo: RepoHelper, tmp_path) -> Path:
-        _add_submodule(repo, "mysub", tmp_path)
+        add_submodule(repo, "mysub", tmp_path)
         repo.branch("child", parent="main")
         wt = repo.worktree("child", str(tmp_path / "wt-child"))
         _git("submodule", "update", "--init", "--recursive", cwd=wt)
@@ -143,7 +122,7 @@ class TestRemoveSubmodule:
         return cli_args(branch="child", yes=True, force=force)
 
     def test_removes_clean_submodule_worktree(self, repo, tmp_path, monkeypatch) -> None:
-        _allow_file_protocol(monkeypatch)
+        allow_file_protocol(monkeypatch)
         wt = self._child_with_submodule(repo, tmp_path)
 
         cmd_remove(self._ns())
@@ -155,7 +134,7 @@ class TestRemoveSubmodule:
     def test_dirty_submodule_refuses_without_force(
         self, repo, tmp_path, monkeypatch, capsys
     ) -> None:
-        _allow_file_protocol(monkeypatch)
+        allow_file_protocol(monkeypatch)
         wt = self._child_with_submodule(repo, tmp_path)
         (wt / "mysub" / "dirty.txt").write_text("uncommitted submodule work")
 
@@ -168,7 +147,7 @@ class TestRemoveSubmodule:
     def test_dirty_submodule_refuses_even_with_ignore_config(
         self, repo, tmp_path, monkeypatch
     ) -> None:
-        _allow_file_protocol(monkeypatch)
+        allow_file_protocol(monkeypatch)
         wt = self._child_with_submodule(repo, tmp_path)
         repo.git("config", "submodule.mysub.ignore", "all")  # would hide the dirt from plain status
         (wt / "mysub" / "dirty.txt").write_text("uncommitted")
@@ -179,7 +158,7 @@ class TestRemoveSubmodule:
         assert wt.exists()
 
     def test_dirty_nested_submodule_refuses(self, repo, tmp_path, monkeypatch) -> None:
-        _allow_file_protocol(monkeypatch)
+        allow_file_protocol(monkeypatch)
         # A submodule (mysub) that itself contains a submodule (deep).
         deep = tmp_path / "sub-deep"
         deep.mkdir()
@@ -207,7 +186,7 @@ class TestRemoveSubmodule:
         assert wt.exists()
 
     def test_dirty_submodule_removed_with_force(self, repo, tmp_path, monkeypatch, capsys) -> None:
-        _allow_file_protocol(monkeypatch)
+        allow_file_protocol(monkeypatch)
         wt = self._child_with_submodule(repo, tmp_path)
         (wt / "mysub" / "dirty.txt").write_text("uncommitted")
 
@@ -242,11 +221,9 @@ class TestRemoveSubmodule:
 
 class TestBranchSubmoduleInit:
     def test_branch_inits_submodules(self, repo: RepoHelper, tmp_path, monkeypatch) -> None:
-        monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
-        monkeypatch.setenv("GIT_CONFIG_KEY_0", "protocol.file.allow")
-        monkeypatch.setenv("GIT_CONFIG_VALUE_0", "always")
+        allow_file_protocol(monkeypatch)
 
-        _add_submodule(repo, "mysub", tmp_path)
+        add_submodule(repo, "mysub", tmp_path)
 
         wt_path = str(tmp_path / "wt-child")
         cmd_branch(cli_args(command="branch", name="child", path=wt_path))
@@ -255,11 +232,9 @@ class TestBranchSubmoduleInit:
         assert (Path(wt_path) / "mysub" / "readme.txt").exists()
 
     def test_branch_no_submodule_init_flag(self, repo: RepoHelper, tmp_path, monkeypatch) -> None:
-        monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
-        monkeypatch.setenv("GIT_CONFIG_KEY_0", "protocol.file.allow")
-        monkeypatch.setenv("GIT_CONFIG_VALUE_0", "always")
+        allow_file_protocol(monkeypatch)
 
-        _add_submodule(repo, "mysub", tmp_path)
+        add_submodule(repo, "mysub", tmp_path)
 
         wt_path = str(tmp_path / "wt-child")
         cmd_branch(cli_args(command="branch", name="child", path=wt_path, no_submodule_init=True))
@@ -272,11 +247,9 @@ class TestPropagateSubmoduleHealth:
     def test_propagate_detects_unhealthy_submodule(
         self, repo: RepoHelper, tmp_path, capsys, monkeypatch
     ) -> None:
-        monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
-        monkeypatch.setenv("GIT_CONFIG_KEY_0", "protocol.file.allow")
-        monkeypatch.setenv("GIT_CONFIG_VALUE_0", "always")
+        allow_file_protocol(monkeypatch)
 
-        _add_submodule(repo, "mysub", tmp_path)
+        add_submodule(repo, "mysub", tmp_path)
         repo.branch("child", parent="main")
         wt = repo.worktree("child", str(tmp_path / "wt-child"))
         _git("submodule", "update", "--init", "--recursive", cwd=wt)
@@ -284,7 +257,7 @@ class TestPropagateSubmoduleHealth:
         repo.checkout("main")
         repo.commit("extra.txt", "extra", "advance main")
 
-        _corrupt_submodule(wt, "mysub")
+        corrupt_submodule(wt, "mysub")
 
         with pytest.raises(TreeError):
             cmd_propagate(cli_args(dry_run=False, no_auto_rerere=False, branch=None, yes=True))
@@ -298,11 +271,9 @@ class TestPropagateSubmoduleHealth:
         """Ordering invariant: the submodule-health gate runs before the clean-state gate
         (git status crashes on a corrupted submodule). A worktree that is BOTH mid-rebase
         AND has a corrupted submodule must report the submodule problem, not the rebase."""
-        monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
-        monkeypatch.setenv("GIT_CONFIG_KEY_0", "protocol.file.allow")
-        monkeypatch.setenv("GIT_CONFIG_VALUE_0", "always")
+        allow_file_protocol(monkeypatch)
 
-        _add_submodule(repo, "mysub", tmp_path)
+        add_submodule(repo, "mysub", tmp_path)
         repo.branch("child", parent="main")
         wt = repo.worktree("child", str(tmp_path / "wt-child"))
         _git("submodule", "update", "--init", "--recursive", cwd=wt)
@@ -317,7 +288,7 @@ class TestPropagateSubmoduleHealth:
         repo.git("rebase", "other", cwd=wt, check=False)  # conflicts, leaves rebase in progress
         assert _has_active_rebase(wt)
 
-        _corrupt_submodule(wt, "mysub")
+        corrupt_submodule(wt, "mysub")
 
         with pytest.raises(TreeError):
             cmd_propagate(cli_args(dry_run=False, no_auto_rerere=False, branch="main", yes=True))
@@ -329,11 +300,9 @@ class TestPropagateSubmoduleHealth:
         self, repo: RepoHelper, tmp_path, monkeypatch
     ) -> None:
         """Uninitialized submodules (no .git) should NOT block propagate."""
-        monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
-        monkeypatch.setenv("GIT_CONFIG_KEY_0", "protocol.file.allow")
-        monkeypatch.setenv("GIT_CONFIG_VALUE_0", "always")
+        allow_file_protocol(monkeypatch)
 
-        _add_submodule(repo, "mysub", tmp_path)
+        add_submodule(repo, "mysub", tmp_path)
         repo.branch("child", parent="main")
         repo.worktree("child", str(tmp_path / "wt-child"))
 
@@ -351,11 +320,9 @@ class TestRebaseSubmoduleHealth:
     def test_rebase_detects_unhealthy_submodule_on_descendant(
         self, repo: RepoHelper, tmp_path, capsys, monkeypatch
     ) -> None:
-        monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
-        monkeypatch.setenv("GIT_CONFIG_KEY_0", "protocol.file.allow")
-        monkeypatch.setenv("GIT_CONFIG_VALUE_0", "always")
+        allow_file_protocol(monkeypatch)
 
-        _add_submodule(repo, "mysub", tmp_path)
+        add_submodule(repo, "mysub", tmp_path)
         repo.branch("child", parent="main")
         wt_child = repo.worktree("child", str(tmp_path / "wt-child"))
         (wt_child / "c.txt").write_text("c")
@@ -371,7 +338,7 @@ class TestRebaseSubmoduleHealth:
         _git("add", "g.txt", cwd=wt_grand)
         _git("commit", "-m", "grand work", cwd=wt_grand)
 
-        _corrupt_submodule(wt_grand, "mysub")
+        corrupt_submodule(wt_grand, "mysub")
         monkeypatch.chdir(wt_child)
 
         with pytest.raises(TreeError):
@@ -393,11 +360,9 @@ class TestRebaseSubmoduleHealth:
     ) -> None:
         # cmd_rebase health-checks the branch itself, a distinct call site from the
         # descendant check above (and one propagate never exercises).
-        monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
-        monkeypatch.setenv("GIT_CONFIG_KEY_0", "protocol.file.allow")
-        monkeypatch.setenv("GIT_CONFIG_VALUE_0", "always")
+        allow_file_protocol(monkeypatch)
 
-        _add_submodule(repo, "mysub", tmp_path)
+        add_submodule(repo, "mysub", tmp_path)
         repo.branch("child", parent="main")
         wt = repo.worktree("child", str(tmp_path / "wt-child"))
         _git("submodule", "update", "--init", "--recursive", cwd=wt)
@@ -405,7 +370,7 @@ class TestRebaseSubmoduleHealth:
         _git("add", "c.txt", cwd=wt)
         _git("commit", "-m", "child work", cwd=wt)
 
-        _corrupt_submodule(wt, "mysub")
+        corrupt_submodule(wt, "mysub")
         monkeypatch.chdir(wt)
 
         with pytest.raises(TreeError):
@@ -633,10 +598,8 @@ class TestSubmoduleInitFailure:
     (which created the worktree successfully) warns but succeeds."""
 
     def _submodule_on_main(self, repo: RepoHelper, tmp_path, monkeypatch) -> None:
-        monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
-        monkeypatch.setenv("GIT_CONFIG_KEY_0", "protocol.file.allow")
-        monkeypatch.setenv("GIT_CONFIG_VALUE_0", "always")
-        _add_submodule(repo, "mysub", tmp_path)
+        allow_file_protocol(monkeypatch)
+        add_submodule(repo, "mysub", tmp_path)
 
     def test_rebuild_errors_when_submodule_init_fails(
         self, repo: RepoHelper, tmp_path, monkeypatch, capsys
@@ -691,4 +654,64 @@ class TestUnparseableGitmodules:
         with pytest.raises(TreeError) as exc:
             cmd_remove(cli_args(branch="child", yes=True))
         assert exc.value.code == 4
+        # It has to be the removal gate refusing, not `_submodule_paths`' own error escaping
+        # through it: only the gate names the branch, and only the gate fails closed by design.
+        assert exc.value.branches == ["child"]
         assert wt.exists()
+
+    def test_json_mode_reports_an_envelope(self, repo: RepoHelper, tmp_path, capsys) -> None:
+        """The parse error used to escape `main()` entirely, giving a traceback and no envelope."""
+        self._repo_with_bad_gitmodules(repo, tmp_path)
+        with pytest.raises(SystemExit):
+            main(["remove", "child", "--json", "-y"])
+
+        envelope = json.loads(capsys.readouterr().out)
+        assert envelope["ok"] is False
+        assert envelope["error"]["code"] == 4
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason="the gate reports an unreadable .gitmodules as uncommitted changes, so the advice "
+        "is to --force away work on a worktree that is in fact clean",
+    )
+    def test_refusal_names_the_real_cause(self, repo: RepoHelper, tmp_path) -> None:
+        """Failing closed is right; describing it as dirt is not.
+
+        The parse error reaches stderr only because `TreeError.__init__` prints on construction,
+        and never reaches the envelope at all. An agent reading the message is told to re-run with
+        `--force` "to discard uncommitted work" that does not exist.
+        """
+        self._repo_with_bad_gitmodules(repo, tmp_path)
+        with pytest.raises(TreeError) as exc:
+            cmd_remove(cli_args(branch="child", yes=True))
+
+        assert ".gitmodules" in exc.value.message
+        assert "uncommitted changes" not in exc.value.message
+
+
+class TestRemoveForceOnCorruptedSubmodule:
+    @pytest.mark.xfail(
+        strict=True,
+        reason="the dirt gate runs even under --force, purely to build a warning, and it is the "
+        "gate that crashes on a corrupted submodule",
+    )
+    def test_force_removes_a_worktree_with_a_corrupted_submodule(
+        self, repo: RepoHelper, tmp_path, monkeypatch
+    ) -> None:
+        """`--force` is the escape hatch, and it cannot open on the case that needs it most.
+
+        `_remove_blocking_dirt` runs `git status --ignore-submodules=none`, which exits 128 when a
+        submodule's `.git` pointer dangles. Nothing catches that, so both plain and `--force`
+        removal die with a raw git failure and the only way out is `rm -rf` plus a manual prune.
+        """
+        allow_file_protocol(monkeypatch)
+        add_submodule(repo, "mysub", tmp_path)
+        repo.branch("child", parent="main")
+        wt = repo.worktree("child", str(tmp_path / "wt-child"))
+        _git("submodule", "update", "--init", "--recursive", cwd=wt)
+        corrupt_submodule(wt, "mysub")
+
+        cmd_remove(cli_args(branch="child", yes=True, force=True))
+
+        assert not wt.exists()
+        assert "child" not in discover().parent_of

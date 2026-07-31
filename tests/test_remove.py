@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import json
+import os
+
 import pytest
 
-from git_tree.cli import TreeError, cmd_remove, discover
+from git_tree.cli import TreeError, _has_active_rebase, cmd_remove, discover, main
 
-from .conftest import RepoHelper, cli_args
+from .conftest import RepoHelper, cli_args, stopped_rebase
 
 
 def _ns(branch: str | None = None, yes: bool = False) -> object:
@@ -221,33 +224,109 @@ class TestRemoveMidRebase:
     rebase is usually dirty.
     """
 
-    def _stopped(self, repo: RepoHelper, tmp_path):
-        repo.commit("shared.txt", "base", "base shared")
+    def test_refuses_and_leaves_the_rebase_intact(self, repo: RepoHelper, tmp_path) -> None:
+        wt = stopped_rebase(repo, tmp_path)
+        with pytest.raises(TreeError) as exc:
+            cmd_remove(_ns(branch="A", yes=True))
+
+        assert exc.value.code == 4
+        # The word "rebase" alone also appears in the dirt gate's `git rebase --abort` advice,
+        # so name the gate that must have fired.
+        assert "a rebase is in progress" in exc.value.message
+        assert wt.exists()
+        assert _has_active_rebase(wt)  # not just present: still resumable
+        assert "A" in discover().parent_of  # tree config intact, so a resume is still possible
+
+    def test_force_still_removes(self, repo: RepoHelper, tmp_path) -> None:
+        wt = stopped_rebase(repo, tmp_path)
+        cmd_remove(cli_args(branch="A", yes=True, force=True))
+        assert not wt.exists()
+
+    def test_force_warns_naming_the_mid_rebase_branch(
+        self, repo: RepoHelper, tmp_path, capsys
+    ) -> None:
+        wt = stopped_rebase(repo, tmp_path)
+        cmd_remove(cli_args(branch="A", yes=True, force=True, dry_run=True))
+
+        out = capsys.readouterr().out
+        assert "will discard the rebase in progress" in out
+        assert "A" in out and str(wt) in out
+        assert _has_active_rebase(wt)  # --dry-run destroyed nothing
+
+
+class TestRemoveDisclosesIgnoredFiles:
+    def test_notice_is_printed_without_force(self, repo: RepoHelper, tmp_path, capsys) -> None:
+        """Said on every path, not only under --force.
+
+        `git status` never reports ignored files, so a clean worktree passes the dirt gate with a
+        `.env` or a virtualenv still in it, and removal deletes them unannounced.
+        """
+        repo.branch("A", parent="main")
+        repo.worktree("A", str(tmp_path / "wt-A"))
+
+        cmd_remove(cli_args(branch="A", yes=True, dry_run=True))
+
+        assert "git-ignored files included" in capsys.readouterr().out
+
+
+class TestRemoveLockedWorktree:
+    @pytest.mark.xfail(
+        strict=True,
+        reason="a lock makes `git worktree remove --force` fail, so removal falls through to the "
+        "unconditional rmtree instead of stopping",
+    )
+    def test_locked_worktree_is_not_removed(self, repo: RepoHelper, tmp_path) -> None:
+        """`git worktree lock` is git's do-not-remove marker and must gate removal.
+
+        git escalates in two steps: an unclean worktree needs `--force`, a locked one needs
+        `--force` twice. git-tree passes it once, so on a locked worktree stage 1 fails and
+        stage 2 `shutil.rmtree`s the directory anyway. The lock does not merely fail to protect,
+        it diverts removal off git's bookkeeping-aware path onto the blind one, and its documented
+        use (a worktree on a share that is not always mounted) is the worst case for that.
+        """
         repo.branch("A", parent="main")
         wt = repo.worktree("A", str(tmp_path / "wt-A"))
-        (wt / "shared.txt").write_text("A version")
-        repo.git("add", "shared.txt", cwd=wt)
-        repo.git("commit", "-m", "A edits shared", cwd=wt)
-        repo.checkout("main")
-        repo.commit("shared.txt", "main version", "main edits shared")
-        repo.stop_rebase_clean(wt, "main", "shared.txt")
-        return wt
+        repo.git("worktree", "lock", "--reason", "on a network share", str(wt))
 
-    def test_refuses_and_leaves_the_rebase_intact(self, repo: RepoHelper, tmp_path, capsys) -> None:
-        wt = self._stopped(repo, tmp_path)
         with pytest.raises(TreeError) as exc:
             cmd_remove(_ns(branch="A", yes=True))
 
         assert exc.value.code == 4
         assert wt.exists()
-        assert (wt / ".git").exists()
-        assert "A" in discover().parent_of  # tree config intact, so a resume is still possible
-        assert "rebase" in capsys.readouterr().err.lower()
+        assert "wt-A" in repo.git("worktree", "list", "--porcelain")
+        assert "A" in discover().parent_of
 
-    def test_force_still_removes(self, repo: RepoHelper, tmp_path) -> None:
-        wt = self._stopped(repo, tmp_path)
-        cmd_remove(cli_args(branch="A", yes=True, force=True))
-        assert not wt.exists()
+
+class TestRemoveUndeletableWorktree:
+    @pytest.mark.xfail(
+        strict=True,
+        reason="shutil.rmtree's OSError escapes main(), so --json emits a traceback and no "
+        "envelope after a partial delete",
+    )
+    def test_rmtree_failure_still_reports_an_envelope(
+        self, repo: RepoHelper, tmp_path, capsys
+    ) -> None:
+        """Every other failure in agent mode arrives as one JSON envelope on stdout.
+
+        `_force_remove_worktree` is the most destructive path in the tool and the only one that
+        can fail after it has already started deleting, so a bare traceback here leaves an agent
+        with no machine-readable account of a half-removed tree.
+        """
+        if os.geteuid() == 0:
+            pytest.skip("root ignores directory permissions")
+        repo.branch("A", parent="main")
+        wt = repo.worktree("A", str(tmp_path / "wt-A"))
+        sealed = wt / "sealed"
+        sealed.mkdir()
+        (sealed / "keep.txt").write_text("cannot be unlinked")
+        sealed.chmod(0o500)  # readable and traversable, but its entries cannot be removed
+        try:
+            with pytest.raises(SystemExit):
+                main(["remove", "A", "--json", "-y", "--force"])
+            envelope = json.loads(capsys.readouterr().out)
+            assert envelope["ok"] is False
+        finally:
+            sealed.chmod(0o700)
 
 
 class TestRemoveUntrackedConfig:

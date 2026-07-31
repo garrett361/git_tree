@@ -127,10 +127,66 @@ class RepoHelper:
         survives with a correct `onto`. Interactive `break`/`edit` stops would be the other way
         to reach this state, but they need a sequence editor and set `amend`/non-`pick` markers.
         """
+        from git_tree.cli import _active_rebase_onto, _has_active_rebase
+
         self.git("-c", "core.editor=true", "rebase", onto, cwd=worktree, check=False)
         self.git("checkout", "--ours", "--", filename, cwd=worktree)
         self.git("add", filename, cwd=worktree)
+        # Assert both halves of the promise, not just the clean one. Callers gate
+        # destructive-command tests on this state, so a rebase that finished, or stopped onto
+        # something else, would quietly turn those into tests of nothing.
+        assert _has_active_rebase(worktree), "expected a stopped rebase, not a finished one"
+        assert _active_rebase_onto(worktree) == self.git("rev-parse", onto), (
+            f"expected the rebase to be stopped onto {onto}"
+        )
         assert not self.git("status", "--porcelain", cwd=worktree), "expected a clean stop"
+
+
+def stopped_rebase(repo: RepoHelper, tmp_path: Path, branch: str = "A") -> Path:
+    """Fork `branch` off main, give each side a conflicting edit to shared.txt, and leave
+    `branch`'s worktree mid-rebase onto main with a clean status. Returns that worktree."""
+    repo.commit("shared.txt", "base", "base shared")
+    repo.branch(branch, parent="main")
+    wt = repo.worktree(branch, str(tmp_path / f"wt-{branch}"))
+    (wt / "shared.txt").write_text(f"{branch} version")
+    repo.git("add", "shared.txt", cwd=wt)
+    repo.git("commit", "-m", f"{branch} edits shared", cwd=wt)
+    repo.checkout("main")
+    repo.commit("shared.txt", "main version", "main edits shared")
+    repo.stop_rebase_clean(wt, "main", "shared.txt")
+    return wt
+
+
+def add_submodule(repo: RepoHelper, name: str, tmp_path: Path) -> Path:
+    """Create a sub-repo and add it to `repo` as a submodule. Returns its path in the worktree."""
+    sub_repo = tmp_path / f"sub-{name}"
+    sub_repo.mkdir()
+    _git("init", cwd=sub_repo)
+    _git("config", "user.email", "test@test.com", cwd=sub_repo)
+    _git("config", "user.name", "Test", cwd=sub_repo)
+    (sub_repo / "readme.txt").write_text("sub content")
+    _git("add", "readme.txt", cwd=sub_repo)
+    _git("commit", "-m", "sub init", cwd=sub_repo)
+    repo.git("-c", "protocol.file.allow=always", "submodule", "add", str(sub_repo), name)
+    repo.git("commit", "-m", f"add submodule {name}")
+    return repo.work / name
+
+
+def corrupt_submodule(worktree: Path, submodule_path: str) -> None:
+    """Point a submodule's `.git` pointer at nothing, so its health check fails."""
+    dot_git = worktree / submodule_path / ".git"
+    dot_git.write_text("gitdir: /nonexistent/path/that/does/not/exist\n")
+
+
+def allow_file_protocol(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let submodule clones over file:// through, for the code under test.
+
+    `-c protocol.file.allow=always` covers only the test's own git calls; production code spawns
+    its own git, so the setting has to reach those through the environment.
+    """
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "protocol.file.allow")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "always")
 
 
 @pytest.fixture(scope="session")
