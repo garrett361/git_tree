@@ -80,9 +80,16 @@ Confirm `pending_from_parent` is 0 for the branches you touched.
 - `kind=unresolved_conflicts`: files still conflicted, or resolved but not `git add`ed.
 - `stopped with changes that are not a conflict`: the most likely one to hit on a resume. The
   conflict is resolved and staged, but some other tracked file in that worktree is modified and
-  unstaged, so git refuses to continue and skipping would discard it. Run `git stash push` in
-  that worktree, then re-run the resume. Do **not** `git add` those files: that folds unrelated
-  work into the commit being replayed. The message lists the files.
+  unstaged, so git refuses to continue and skipping would discard it. The message lists those
+  files; move them aside **by name**, then re-run the resume:
+
+  ```sh
+  git -C <worktree> stash push -- <file>...
+  ```
+
+  Name the files. A bare `git stash push` also takes the staged conflict resolution, leaving an
+  empty index and an empty replay. And do not `git add` them: `--continue` commits whatever is
+  staged as the commit being replayed, so that folds unrelated work into someone else's commit.
 - `an operation in progress that rebasing would discard`: a merge, cherry-pick, or revert is
   half-done in that worktree. Finish or abort it there, then re-run. Note this fires even when
   the user has already staged their resolutions, which is why nothing else caught it.

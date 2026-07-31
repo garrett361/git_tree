@@ -1464,12 +1464,15 @@ def _refuse_unfinished_replay(
 ) -> NoReturn:
     """The rebase stopped with no conflict but with changes present, so it cannot be skipped."""
     files = git_lines("diff", "--name-only", "HEAD", cwd=cwd)
+    # Name the paths in the suggested stash: a bare `git stash push` would also take the staged
+    # conflict resolution, and `git add` would fold these into the commit being replayed.
+    paths = " ".join(files) or "<file>..."
     lines = [
         f"{branch}'s rebase in {cwd} is stopped with changes that are not a conflict:",
         *(f"  {f}" for f in files),
-        "`git rebase --skip` would discard them. Move them out of the way with "
-        "`git stash push` (not `git add`, which folds them into the commit being replayed),",
-        f"then re-run: {' '.join(resume_cmd)}",
+        "`git rebase --skip` would discard them. Move them aside, keeping any staged conflict",
+        f"resolution: git -C {cwd} stash push -- {paths}",
+        f"Then re-run: {' '.join(resume_cmd)}",
     ]
     if stash:
         lines.append(f"An earlier stash from this run is also waiting: git stash apply {stash}")

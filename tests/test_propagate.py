@@ -675,6 +675,15 @@ class TestPropagateResumeScope:
         assert (wt_A1 / "a-only.txt").read_text() == "work in progress"
         assert _has_active_rebase(wt_A1)  # still resumable once the edit is dealt with
 
+        # The advice the error gives must actually work. It names the paths on purpose: a bare
+        # `git stash push` would take the staged resolution too, emptying the replay.
+        repo.git("stash", "push", "--", "a-only.txt", cwd=wt_A1)
+        cmd_propagate(_ns(branch="A"))
+
+        assert not _has_active_rebase(wt_A1)
+        assert "A1 edits shared" in repo.git("log", "--oneline", "A1")
+        assert (wt_A1 / "shared.txt").read_text() == "resolved"
+
     def test_resume_covers_named_branch_whole_subtree(self, repo: RepoHelper) -> None:
         # Resuming `propagate R` finishes the stuck child AND propagates the other drifted child.
         repo.commit("shared.txt", "original", "base shared")
