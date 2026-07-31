@@ -272,8 +272,11 @@ class TestRemoveDisclosesIgnoredFiles:
 class TestRemoveLockedWorktree:
     @pytest.mark.xfail(
         strict=True,
-        reason="a lock makes `git worktree remove --force` fail, so removal falls through to the "
-        "unconditional rmtree instead of stopping",
+        reason="git escalates in two steps, unclean needs --force and locked needs --force twice, "
+        "but _force_remove_worktree passes it once, so on a locked worktree stage 1 fails and the "
+        "unconditional shutil.rmtree deletes it anyway. Fix: gate on the lock in cmd_remove "
+        "alongside dirt and mid-rebase, and have stage 1 pass --force twice under --force so git "
+        "does the removal instead of falling through to rmtree.",
     )
     def test_locked_worktree_is_not_removed(self, repo: RepoHelper, tmp_path) -> None:
         """`git worktree lock` is git's do-not-remove marker and must gate removal.
@@ -300,8 +303,10 @@ class TestRemoveLockedWorktree:
 class TestRemoveUndeletableWorktree:
     @pytest.mark.xfail(
         strict=True,
-        reason="shutil.rmtree's OSError escapes main(), so --json emits a traceback and no "
-        "envelope after a partial delete",
+        reason="shutil.rmtree's OSError escapes main(), which catches only CalledProcessError and "
+        "TreeError, so --json prints a Python traceback and no envelope after some of the tree is "
+        "already deleted. Fix: catch OSError in _force_remove_worktree and raise TreeError, naming "
+        "the worktree that could not be removed and which ones already were.",
     )
     def test_rmtree_failure_still_reports_an_envelope(
         self, repo: RepoHelper, tmp_path, capsys

@@ -98,6 +98,14 @@ Real git operations against isolated repos (no mocking). The `repo` fixture (`te
 
 To call a `cmd_*` handler directly, build its args with `cli_args(**overrides)` (`tests/conftest.py`), which returns a **complete** namespace (every flag at its parser default, derived by walking `_build_parser()`). Handlers read `args.<flag>` directly (no `getattr` defaults), so a missing field raises `AttributeError`: a partial hand-built `argparse.Namespace(...)` is a fixture bug, not something production code should tolerate. Always go through `cli_args`.
 
+**Known bugs live as `xfail` tests, and that is the TODO list.** A defect we have decided to fix but have not fixed yet is committed as a regression test marked `@pytest.mark.xfail(strict=True, reason=...)`. `strict` is what makes this work: the moment the behavior is fixed, the test XPASSes and the suite fails, so the fix and the marker removal have to land together. Nothing drifts out of date, and no bug is tracked anywhere the code cannot see.
+
+```sh
+uv run pytest tests/ -q -rx    # the TODO list, one line per known bug
+```
+
+Write the `reason` as a work item someone with no context can pick up: what is wrong, where, and what fixed looks like, including the design decision if one was made. If the fix is shared with another `xfail`, say which. It is the only place that reasoning is written down, so a bare "X is broken" is not enough. The test body is the reproduction, and the assertions define done.
+
 ## Conventions
 
 - Python 3.11+, stdlib only (no runtime deps)

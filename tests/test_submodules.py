@@ -671,8 +671,12 @@ class TestUnparseableGitmodules:
 
     @pytest.mark.xfail(
         strict=True,
-        reason="the gate reports an unreadable .gitmodules as uncommitted changes, so the advice "
-        "is to --force away work on a worktree that is in fact clean",
+        reason="_remove_blocking_dirt returns one bool for four situations (real dirt, unreadable "
+        ".gitmodules, an uninspectable submodule directory, a failed foreach), so cmd_remove and "
+        "cmd_rebuild describe all four as uncommitted changes and tell the user to --force away "
+        "work that does not exist. Fix: return a reason instead, a StrEnum kind plus git's own "
+        "text as detail, and word the refusal per kind at each call site. Doing this also fixes "
+        "test_force_removes_a_worktree_with_a_corrupted_submodule, since the gate stops raising.",
     )
     def test_refusal_names_the_real_cause(self, repo: RepoHelper, tmp_path) -> None:
         """Failing closed is right; describing it as dirt is not.
@@ -692,8 +696,13 @@ class TestUnparseableGitmodules:
 class TestRemoveForceOnCorruptedSubmodule:
     @pytest.mark.xfail(
         strict=True,
-        reason="the dirt gate runs even under --force, purely to build a warning, and it is the "
-        "gate that crashes on a corrupted submodule",
+        reason="cmd_remove runs _remove_blocking_dirt even when force is already true, only to "
+        "build a warning banner, and its `git status --ignore-submodules=none` exits 128 on a "
+        "dangling submodule pointer. The uncaught CalledProcessError means --force cannot remove "
+        "the worktree it exists for, leaving `rm -rf` plus a manual prune as the only way out. "
+        "Fix: make the gate total so it reports 'cannot prove clean' rather than raising, per "
+        "test_refusal_names_the_real_cause; guarding the call with `if not force` would work but "
+        "loses the banner.",
     )
     def test_force_removes_a_worktree_with_a_corrupted_submodule(
         self, repo: RepoHelper, tmp_path, monkeypatch

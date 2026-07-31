@@ -92,7 +92,8 @@ class TestRebuildDirtGate:
 class TestRebuildIgnoredFiles:
     @pytest.mark.xfail(
         strict=True,
-        reason="rebuild deletes the worktree directory but never says ignored files go with it",
+        reason="rebuild deletes the worktree directory without saying git-ignored files go with "
+        "it. Fix: print the notice cmd_remove prints, on every path, not only under --force.",
     )
     def test_plan_discloses_that_ignored_files_are_deleted(
         self, repo: RepoHelper, tmp_path, capsys
