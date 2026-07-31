@@ -294,11 +294,7 @@ of `["git","tree","propagate",<branch>]`, and re-running that argv finishes the 
 
 ## Current state
 
-Nothing in `git_tree/` has been touched — no production code has moved. A draft of step 0 (test
-files only) may be sitting uncommitted in the working tree; check `git status` first and either
-verify and commit it, or discard it and redo it from the description above. Its lint was clean and
-`test_split`/`test_fork`/`test_remove`/`test_attach` passed, but the full suite was never run
-against it.
+Not started. Begin at step 0.
 
 Baseline at the time of writing (commit `594e3cf`): 144 top-level names in `cli.py`; full gate
 green at 292 passed, 5 xfailed.
