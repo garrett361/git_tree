@@ -65,8 +65,10 @@ Repeat this section for each further conflict.
 ## 4. Finish
 
 - **Stashed work.** If the worktree was dirty when the cascade started, git-tree stashed it and a
-  resume does not pop it. The conflict message says so when it applies. Run
-  `cd <worktree> && git stash pop`.
+  resume does not restore it. The conflict message names the exact stash commit when this
+  applies: run the `git stash apply <sha>` it prints, from that worktree. Use the SHA it gives
+  you rather than `stash@{0}`, which is shared across every worktree in the repo and may point
+  at a different one by now.
 - **A parent that moved during the pause.** A resume records the fork commit at the base actually
   replayed onto, not the parent's current tip, so the branch can land behind the parent and look
   finished. Re-run `git tree propagate <parent>`.

@@ -177,3 +177,22 @@ class TestDetach:
 
         with pytest.raises(SystemExit):
             cmd_detach(_ns())
+
+
+class TestDetachRemoteAnchor:
+    def test_detached_subtree_keeps_a_pushable_remote(self, repo: RepoHelper, tmp_path) -> None:
+        """A tree's remote lives on its root, so a new root needs one carried over.
+
+        `rebase` and `split` already do this when they re-root a subtree; `detach` did not, so
+        the detached subtree had no remote and the next `push` refused with a config hint.
+        """
+        repo.branch("A", parent="main")
+        repo.worktree("A", str(tmp_path / "wt-A"))
+        repo.branch("B", parent="A")
+        repo.worktree("B", str(tmp_path / "wt-B"))
+        repo.git("config", "branch.main.remote", "origin")
+
+        cmd_detach(cli_args(branch="A", yes=True))
+
+        assert repo.git("config", "--get", "branch.A.remote", check=False) == "origin"
+        assert repo.git("config", "--get", "branch.main.remote", check=False) == "origin"

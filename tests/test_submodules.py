@@ -666,3 +666,29 @@ class TestSubmoduleInitFailure:
         assert "Warning: submodule init did not complete" in captured.err
         assert "Created branch child" in captured.out  # branch creation still succeeded
         assert Path(wt_path).exists()
+
+
+class TestUnparseableGitmodules:
+    """git accepts a repeated `[submodule "x"]` section; configparser does not.
+
+    Left uncaught it escaped `main()`'s handlers, giving a traceback and no JSON envelope. It
+    must also fail closed in the removal gate: a `.gitmodules` we cannot read is not proof that
+    there is no submodule work to lose.
+    """
+
+    def _repo_with_bad_gitmodules(self, repo: RepoHelper, tmp_path) -> Path:
+        repo.branch("child", parent="main")
+        wt = repo.worktree("child", str(tmp_path / "wt-child"))
+        (wt / ".gitmodules").write_text(
+            '[submodule "x"]\n\tpath = x\n[submodule "x"]\n\tpath = x\n'
+        )
+        repo.git("add", ".gitmodules", cwd=wt)
+        repo.git("commit", "-m", "duplicate submodule sections", cwd=wt)
+        return wt
+
+    def test_remove_refuses_rather_than_crashing(self, repo: RepoHelper, tmp_path) -> None:
+        wt = self._repo_with_bad_gitmodules(repo, tmp_path)
+        with pytest.raises(TreeError) as exc:
+            cmd_remove(cli_args(branch="child", yes=True))
+        assert exc.value.code == 4
+        assert wt.exists()

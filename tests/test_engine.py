@@ -20,18 +20,20 @@ def _commit_in(repo: RepoHelper, wt, filename: str, content: str, message: str) 
 
 
 class TestStashDetection:
-    def test_returns_true_only_when_a_stash_is_created(self, repo: RepoHelper) -> None:
+    def test_returns_the_new_stash_only_when_one_is_created(self, repo: RepoHelper) -> None:
         # Clean tree: nothing stashed.
-        assert _stash_push_if_created(repo.work) is False
+        assert _stash_push_if_created(repo.work) is None
 
         # Untracked-only: `git stash push` (no -u) creates nothing.
         (repo.work / "untracked.txt").write_text("u")
-        assert _stash_push_if_created(repo.work) is False
+        assert _stash_push_if_created(repo.work) is None
         (repo.work / "untracked.txt").unlink()
 
-        # Tracked change: a stash is created (locale-independent detection).
+        # Tracked change: a stash is created (locale-independent detection), and the caller gets
+        # its SHA, since `refs/stash` is shared repo-wide and `stash@{0}` can shift under it.
         (repo.work / "init.txt").write_text("changed")
-        assert _stash_push_if_created(repo.work) is True
+        created = _stash_push_if_created(repo.work)
+        assert created == repo.git("rev-parse", "refs/stash")
         assert repo.git("stash", "list")  # a stash entry now exists
         # working tree restored by the stash
         assert repo.git("status", "--porcelain") == ""

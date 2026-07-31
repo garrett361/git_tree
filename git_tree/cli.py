@@ -1053,6 +1053,10 @@ def cmd_detach(args: argparse.Namespace) -> None:
     if not _proceed(args, "Proceed?"):
         return
 
+    # A tree's remote is anchored on its root, so `branch` needs one before it becomes a root.
+    # Read the old root first: unsetting the config below is what severs the path to it. This
+    # copies rather than moves, so the tree left behind keeps its own anchor.
+    _carry_remote_to_root(root_of(graph, branch), branch)
     _unset_tree_config(branch)
     print(f"Detached {branch} (was child of {parent})")
 
@@ -1079,7 +1083,11 @@ def _remove_blocking_dirt(wt: Path) -> bool:
     """
     if _worktree_status(wt, ignore_submodules="none", untracked_files="normal").dirty:
         return True
-    for sub in _submodule_paths(wt):
+    try:
+        subs = _submodule_paths(wt)
+    except TreeError:
+        return True  # unreadable .gitmodules: cannot prove there is no submodule work to lose
+    for sub in subs:
         d = wt / sub
         try:
             if not (d / ".git").exists() and d.is_dir() and any(d.iterdir()):
@@ -1217,6 +1225,9 @@ def cmd_remove(args: argparse.Namespace) -> None:
 
     print(f"Removing worktrees and unregistering {target} + its subtree (branch refs kept):")
     print(format_tree(graph, root=target))
+    # Said on every path, not just --force: `git status` never reports ignored files, so they are
+    # deleted without ever having been counted as dirt. `.env` files and venvs live here.
+    print("\nThis deletes each worktree directory, git-ignored files included.")
     if dirty:  # implies force
         print("\nWarning: --force will destroy uncommitted changes (and any git-ignored files) in:")
         for b in dirty:
@@ -1485,7 +1496,7 @@ def _rebase_onto(
     fork_point: str,
     cwd: Path,
     auto_rerere: bool,
-    stashed: bool,
+    stash: str | None,
     resume_cmd: list[str],
 ) -> str:
     """Attempt rebase of child onto parent in its worktree. Returns status or exits on conflict."""
@@ -1515,17 +1526,25 @@ def _rebase_onto(
         # pre-rebase hook reject, ...) — don't infer "ok" from stderr text.
         if git("rev-parse", "HEAD", cwd=cwd) != head_before:
             return "ok"
-        # git_echo already reprinted git's stderr above.
-        raise TreeError(f"rebase of {child} onto {parent} failed (see output above)")
+        # git_echo already reprinted git's stderr above. Name the stash if one was taken: the
+        # rebase never started, so nothing pops it, and the worktree just looks mysteriously
+        # clean until the user goes looking.
+        note = (
+            f"\nYour uncommitted changes were stashed first — restore them with: "
+            f"cd {cwd} && git stash apply {stash}"
+            if stash
+            else ""
+        )
+        raise TreeError(f"rebase of {child} onto {parent} failed (see output above){note}")
 
-    return _drive_conflicted_rebase(child, parent, cwd, stashed, auto_rerere, resume_cmd, rr)
+    return _drive_conflicted_rebase(child, parent, cwd, stash, auto_rerere, resume_cmd, rr)
 
 
 def _drive_conflicted_rebase(
     child: str,
     parent: str,
     cwd: Path,
-    stashed: bool,
+    stash: str | None,
     auto_rerere: bool,
     resume_cmd: list[str],
     rr: list[str],
@@ -1537,22 +1556,22 @@ def _drive_conflicted_rebase(
         status = _skip_empty_commits(cwd, child, resume_cmd)
         if status is not None:
             return status
-        _conflict_exit(child, parent, cwd, stashed, resume_cmd)
+        _conflict_exit(child, parent, cwd, stash, resume_cmd)
 
     if not auto_rerere:
-        _conflict_exit(child, parent, cwd, stashed, resume_cmd)
+        _conflict_exit(child, parent, cwd, stash, resume_cmd)
 
     while True:
         git_echo(*rr, "rerere", cwd=cwd)
 
         remaining = git(*rr, "rerere", "remaining", cwd=cwd, check=False)
         if remaining.strip():
-            _conflict_exit(child, parent, cwd, stashed, resume_cmd)
+            _conflict_exit(child, parent, cwd, stash, resume_cmd)
 
         # git_echo swallows failures (check=False); a failed staging would otherwise loop
         # here forever, so treat it as an unresolvable conflict and stop.
         if not git_echo_ok("add", "-u", cwd=cwd):
-            _conflict_exit(child, parent, cwd, stashed, resume_cmd)
+            _conflict_exit(child, parent, cwd, stash, resume_cmd)
 
         continued = git_echo_ok(*rr, "rebase", "--continue", cwd=cwd, env={"GIT_EDITOR": "true"})
         if continued:
@@ -1563,11 +1582,11 @@ def _drive_conflicted_rebase(
             status = _skip_empty_commits(cwd, child, resume_cmd)
             if status is not None:
                 return "ok (rerere)"
-            _conflict_exit(child, parent, cwd, stashed, resume_cmd)
+            _conflict_exit(child, parent, cwd, stash, resume_cmd)
 
 
 def _conflict_exit(
-    child: str, parent: str, cwd: Path, stashed: bool, resume_cmd: list[str]
+    child: str, parent: str, cwd: Path, stash: str | None, resume_cmd: list[str]
 ) -> NoReturn:
     # `resume_cmd` is the exact command that resumes this cascade (always a `git tree propagate
     # <branch>`); both the message and the machine `remedy` name it, and re-running it finishes
@@ -1582,9 +1601,12 @@ def _conflict_exit(
     lines.append(
         "git-tree finishes the rebase for you; no need to run `git rebase --continue` yourself."
     )
-    if stashed:
+    if stash:
+        # By SHA, not `stash@{0}`: `refs/stash` is shared across the repo's worktrees, so that
+        # index can point at another worktree's entry by the time this is read.
         lines.append(
-            f"Note: dirty worktree was stashed — after resuming, run: cd {cwd} && git stash pop"
+            f"Note: dirty worktree was stashed — after resuming, run: "
+            f"cd {cwd} && git stash apply {stash}"
         )
     raise ConflictError(
         "\n".join(lines),
@@ -1719,16 +1741,18 @@ def _has_unmerged(cwd: Path) -> bool:
     return bool(git("ls-files", "--unmerged", cwd=cwd, check=False).strip())
 
 
-def _stash_push_if_created(cwd: Path) -> bool:
-    """Stash tracked changes; return True iff a new stash entry was created.
+def _stash_push_if_created(cwd: Path) -> str | None:
+    """Stash tracked changes; return the new stash commit, or None if nothing was stashed.
 
     Detect via `refs/stash` advancing rather than parsing git's stdout, which is
-    locale-dependent ("Saved working directory ..." is only English).
+    locale-dependent ("Saved working directory ..." is only English). The SHA is what callers
+    quote back to the user: `refs/stash` is shared by every worktree in the repo, so by the time
+    anyone reads the advice, `stash@{0}` may be a different worktree's entry.
     """
     before = git("rev-parse", "--verify", "--quiet", "refs/stash", cwd=cwd, check=False)
     git_echo("stash", "push", cwd=cwd)
     after = git("rev-parse", "--verify", "--quiet", "refs/stash", cwd=cwd, check=False)
-    return bool(after) and after != before
+    return after if after and after != before else None
 
 
 def _require_clean_state(branches: list[str], graph: Graph, resume_cmd: list[str]) -> None:
@@ -1813,7 +1837,13 @@ def _submodule_paths(worktree: Path) -> list[str]:
     if not gitmodules.exists():
         return []
     cfg = configparser.ConfigParser(interpolation=None)
-    cfg.read(str(gitmodules))
+    try:
+        cfg.read(str(gitmodules))
+    except (configparser.Error, UnicodeDecodeError, OSError) as err:
+        # git accepts things configparser rejects, a repeated `[submodule "x"]` section among
+        # them, and this escaping uncaught would mean a traceback and no JSON envelope. Callers
+        # that use this to decide whether deleting is safe must treat it as "cannot prove clean".
+        raise TreeError(f"Could not parse {gitmodules}: {err}", code=4) from err
     paths = []
     for sec in cfg.sections():
         if cfg.has_option(sec, "path"):
@@ -1930,13 +1960,13 @@ def _rebase_branch(
     the resume hint on conflict."""
     cwd = info.worktree
     assert cwd is not None  # callers guarantee a worktree via _require_worktrees
-    stashed = info.is_dirty and _stash_push_if_created(cwd)
-    note = _rebase_onto(branch, onto, fork_point, cwd, auto_rerere, stashed, resume_cmd)
+    stash = _stash_push_if_created(cwd) if info.is_dirty else None
+    note = _rebase_onto(branch, onto, fork_point, cwd, auto_rerere, stash, resume_cmd)
     # Rebase succeeded; record the fork before the pop (which only touches the
     # working tree). `rev-parse(onto)` is stable here — rebasing `branch` never
     # moves `onto`.
     _set_fork_commit(branch, git("rev-parse", onto))
-    pop_conflicted = stashed and not git_echo_ok("stash", "pop", cwd=cwd)
+    pop_conflicted = stash is not None and not git_echo_ok("stash", "pop", cwd=cwd)
     return RebaseResult(note, pop_conflicted)
 
 
@@ -1984,7 +2014,7 @@ def _advance_branch(
     if _has_active_rebase(cwd):
         # `--continue` stopped again: a later commit conflicts (drive it through rerere the same
         # way a fresh rebase does), or it resolved to an empty patch to skip. Never stashes here.
-        _drive_conflicted_rebase(branch, parent, cwd, False, auto_rerere, resume_cmd, rr)
+        _drive_conflicted_rebase(branch, parent, cwd, None, auto_rerere, resume_cmd, rr)
     # Record the fork at the base the rebase actually replayed onto (may predate a since-moved
     # `parent`); merge-base fallback in _get_fork_commit self-heals if it ever drifts.
     _set_fork_commit(branch, actual_onto or git("rev-parse", parent))
