@@ -101,5 +101,9 @@ Confirm `pending_from_parent` is 0 for the branches you touched.
   or the branch has no tree-parent. Finish it or `git rebase --abort` in that worktree, then
   re-run. Do not read the base as the reason unless the message says so: a base that is an
   ancestor of the tree-parent is normal and expected while a cascade is paused.
+- `would invalidate a rebase already in progress below it`: from `git tree rebase`, when a branch
+  under the one being rebased is paused mid-cascade. Rewriting the branch above would strand it,
+  so nothing has moved yet. Finish the paused branch with the `git tree propagate <branch>` the
+  message names, then re-run the rebase.
 - `These branches have corrupted submodule state`: follow the `git-tree-doctor` skill.
 - `These branches need worktrees`: `git worktree add <path> <branch>` for each, then re-run.

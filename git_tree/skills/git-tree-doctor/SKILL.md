@@ -97,6 +97,9 @@ Two cases, distinguished by what git-tree says when you re-run the cascade:
 A branch mid-rebase with no tree-parent cannot be resumed by git-tree either. Finish it with
 `git rebase --continue` in its worktree.
 
+`git tree rebase` refuses while any branch below the one named is mid-rebase, naming it: rewriting
+the branch above would strand it. Finish that branch first, then re-run the rebase.
+
 ## `conflicted` above 0 with no rebase in progress
 
 Usually a stalled merge. Resolve it with plain git in that worktree, with the user's approval on

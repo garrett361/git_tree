@@ -1722,6 +1722,18 @@ def _has_active_rebase_safe(cwd: Path) -> bool:
         return False
 
 
+def _mid_rebase_branches(branches: list[str], graph: Graph) -> list[tuple[str, Path]]:
+    """The branches whose worktree has a rebase in progress, with that worktree."""
+    # A worktree that cannot be inspected answers no: the worktree and cleanliness gates report
+    # that far better than a guard built on top of them.
+    found: list[tuple[str, Path]] = []
+    for b in branches:
+        info = graph.branches.get(b)
+        if info and info.worktree and _has_active_rebase_safe(info.worktree):
+            found.append((b, info.worktree))
+    return found
+
+
 class SequencerOp(StrEnum):
     """A merge, cherry-pick, or revert left in progress."""
 
@@ -2036,7 +2048,7 @@ def _force_remove_worktree(path: Path, branch: str) -> None:
 @dataclass(frozen=True)
 class RebaseResult:
     note: str  # how the rebase completed, for display: "ok", "ok (rerere)", ...
-    pop_conflicted: bool = False
+    unpopped_stash: str | None = None  # stash commit left behind when the pop conflicted
 
 
 def _rebase_branch(
@@ -2051,7 +2063,7 @@ def _rebase_branch(
     """Rebase `branch` onto `onto` in its worktree, stashing/popping dirty changes
     and recording the new fork point. Raises (via _rebase_onto) on a real conflict,
     leaving the rebase in progress. A pop conflict is non-fatal (the branch ref is
-    already rebased); it's reported via `pop_conflicted` and the worktree is left
+    already rebased); it's reported via `unpopped_stash` and the worktree is left
     for the user. `resume_cmd` is the command that resumes the cascade, surfaced in
     the resume hint on conflict."""
     cwd = info.worktree
@@ -2062,8 +2074,10 @@ def _rebase_branch(
     # working tree). `rev-parse(onto)` is stable here — rebasing `branch` never
     # moves `onto`.
     _set_fork_commit(branch, git("rev-parse", onto))
-    pop_conflicted = stash is not None and not git_echo_ok("stash", "pop", cwd=cwd)
-    return RebaseResult(note, pop_conflicted)
+    # Keep the stash commit, not `stash@{0}`: `refs/stash` is shared by every worktree in the repo,
+    # so the index the user reads later may name a different worktree's entry.
+    unpopped = stash if stash and not git_echo_ok("stash", "pop", cwd=cwd) else None
+    return RebaseResult(note, unpopped)
 
 
 def _advance_branch(
@@ -2126,7 +2140,7 @@ def _advance_branch(
     onto_live = _rebase_branch(
         branch, parent, actual_onto, info, auto_rerere=auto_rerere, resume_cmd=resume_cmd
     )
-    return RebaseResult("resumed", pop_conflicted=onto_live.pop_conflicted)
+    return RebaseResult("resumed", unpopped_stash=onto_live.unpopped_stash)
 
 
 def _resume_cmd(branch: str) -> list[str]:
@@ -2162,7 +2176,12 @@ def _propagate_descendants(
         r = _advance_branch(
             child, parent, info, fork_point, auto_rerere=auto_rerere, resume_cmd=resume_cmd
         )
-        text = "rebased (stash pop conflict - resolve manually)" if r.pop_conflicted else r.note
+        text = (
+            f"rebased (stash pop conflict; restore with: "
+            f"cd {info.worktree} && git stash apply {r.unpopped_stash})"
+            if r.unpopped_stash
+            else r.note
+        )
         # Stream each result as it lands: a mid-cascade conflict raises before this returns,
         # so streaming is what makes the already-rebased branches visible.
         print(f"  {child}: {text}")
@@ -2318,6 +2337,23 @@ def cmd_rebase(args: argparse.Namespace) -> None:
             code=4,
         )
 
+    # Rewriting `branch` invalidates any rebase in progress below it: its base is about to stop
+    # being an ancestor of its parent, so the cascade would reach it and refuse it as a rebase
+    # git-tree did not start, with no way back to this state. `_require_ready` below admits such a
+    # rebase as a resume point, which is right for `propagate` and wrong here, so refuse while it
+    # can still be finished, and before the reparent write.
+    if stopped := _mid_rebase_branches(descendants, graph):
+        lines = [f"Rebasing {branch} would invalidate a rebase already in progress below it:"]
+        for d, wt in stopped:
+            fix = (
+                f"finish it with: git tree propagate {d}"
+                if _is_git_tree_rebase(wt, graph.parent_of.get(d))
+                else "not started by git-tree: finish it or `git rebase --abort` there"
+            )
+            lines.append(f"  {d}  (in: {wt}) {fix}")
+        lines.append(f"\nThen re-run: git tree rebase {target} {branch}")
+        raise TreeError("\n".join(lines), code=4, branches=[d for d, _ in stopped])
+
     _require_healthy_submodules([branch], graph)
     _require_clean_state([branch], graph, resume_cmd)
     if descendants:
@@ -2355,9 +2391,10 @@ def cmd_rebase(args: argparse.Namespace) -> None:
     r = _rebase_branch(
         branch, target, fork_point, info, auto_rerere=auto_rerere, resume_cmd=resume_cmd
     )
-    if r.pop_conflicted:
+    if r.unpopped_stash:
         print(
-            f"Warning: could not pop worktree stash — run: cd {info.worktree} && git stash pop",
+            f"Warning: could not pop worktree stash; your changes are still in it. Restore them "
+            f"with: cd {info.worktree} && git stash apply {r.unpopped_stash}",
             file=sys.stderr,
         )
     print(f"Rebased {branch} onto {target}")

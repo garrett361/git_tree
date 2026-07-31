@@ -471,11 +471,6 @@ class TestNamedBranch:
             cmd_rebase(_ns(target="main", branch="loose", yes=True))
         assert exc.value.code == 5
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="the mid-rebase guard covers only the named branch, so a stopped descendant is "
-        "admitted, invalidated by the reparent, and then refused as foreign",
-    )
     def test_mid_rebase_descendant_is_refused_before_anything_moves(
         self, repo: RepoHelper, tmp_path
     ) -> None:
@@ -522,11 +517,6 @@ class TestNamedBranch:
 
 
 class TestRebaseStashAdvice:
-    @pytest.mark.xfail(
-        strict=True,
-        reason="cmd_rebase still advises `git stash pop`, which errors after the failed pop and "
-        "names a `refs/stash` index shared with every other worktree",
-    )
     def test_pop_conflict_advice_names_the_stash_commit(
         self, repo: RepoHelper, tmp_path, capsys
     ) -> None:

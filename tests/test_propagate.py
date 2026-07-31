@@ -538,6 +538,9 @@ class TestStashPopConflict:
 
         out = capsys.readouterr().out
         assert "stash pop conflict" in out
+        # Name where the work is: the worktree, and the stash by SHA (`refs/stash` is shared
+        # across worktrees, so `stash@{0}` may be someone else's entry by the time it is read).
+        assert f"cd {wt_b} && git stash apply {repo.git('rev-parse', 'refs/stash')}" in out
         # The rebase itself succeeded: b's ref moved onto main's new tip.
         assert repo.git("rev-parse", "b") == repo.git("rev-parse", "main")
         # The failed pop left the collision in the worktree for the user to resolve.
