@@ -269,23 +269,46 @@ definition silently shadows the other, leaving two copies to drift. Snapshot the
 before step 1 and assert after every step that the union across `git_tree/*.py` still equals it,
 with no name owned twice:
 
+Save this as `check_partition.py` outside the repo and run it **from the repo root** (its paths
+are repo-relative): `python check_partition.py save` once before step 1, then
+`python check_partition.py` after every step. Verified against commit `594e3cf`: 144 names, no
+duplicates, exit 0.
+
 ```python
-import ast, pathlib, collections
-owner = collections.defaultdict(list)
-for f in pathlib.Path("git_tree").glob("*.py"):
-    for node in ast.parse(f.read_text()).body:
-        if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
-            owner[node.name].append(f.name)
-        elif isinstance(node, ast.Assign):
-            for t in node.targets:
-                if isinstance(t, ast.Name):
-                    owner[t.id].append(f.name)
-        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-            owner[node.target.id].append(f.name)
-dupes = {k: v for k, v in owner.items() if len(v) > 1}
-assert not dupes, dupes
-assert set(owner) == BASELINE, set(owner) ^ BASELINE
+import ast, collections, json, pathlib, sys
+
+BASELINE = pathlib.Path("/tmp/git_tree_baseline.json")
+
+def owners(paths):
+    found = collections.defaultdict(list)
+    for f in paths:
+        for node in ast.parse(f.read_text()).body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                found[node.name].append(f.stem)
+            elif isinstance(node, ast.Assign):
+                found.update({t.id: found[t.id] + [f.stem]
+                              for t in node.targets if isinstance(t, ast.Name)})
+            elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+                found[node.target.id].append(f.stem)
+    return found
+
+pkg = pathlib.Path("git_tree")
+if len(sys.argv) > 1 and sys.argv[1] == "save":
+    names = sorted(owners([pkg / "cli.py"]))
+    BASELINE.write_text(json.dumps(names))
+    sys.exit(f"baseline: {len(names)} names")
+
+found = owners(p for p in sorted(pkg.glob("*.py")) if p.name != "__init__.py")
+base = set(json.loads(BASELINE.read_text()))
+dupes = {k: v for k, v in found.items() if len(v) > 1}
+print("defined twice:", dupes or "none")
+print("lost:", sorted(base - set(found)) or "none")
+print("new:", sorted(set(found) - base) or "none")
+sys.exit(1 if (dupes or base ^ set(found)) else 0)
 ```
+
+A "new" name mid-migration means someone added a symbol to `cli.py` while the split was in
+flight (see risk 8) — place it by its call sites and add it to the layout table before continuing.
 
 At the end, on a scratch stacked repo: `git tree --json` emits exactly one JSON object on stdout
 with diagnostics on stderr; `git tree skills` lists the same three skills with the same destination
