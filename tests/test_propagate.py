@@ -650,6 +650,31 @@ class TestPropagateResumeScope:
         assert "A edits shared" in repo.git("log", "--oneline", "A1")
         assert repo.git("config", "branch.A1.tree-fork-commit") == repo.git("rev-parse", "A")
 
+    def test_resume_with_unrelated_unstaged_change_keeps_the_commit(self, repo: RepoHelper) -> None:
+        """An unstaged tracked edit must not cost the branch its commit.
+
+        `git rebase --continue` refuses while any tracked file is modified but unstaged, even
+        though the conflict itself is resolved and staged. The index then has no unmerged
+        entries, so a `--skip` here would hard-reset the commit being replayed, the resolution,
+        and the unstaged edit, and report success.
+        """
+        _wt_A, wt_A1, _wt_S = self._tree(repo, sibling_conflicts=False)
+        with pytest.raises(SystemExit):
+            cmd_propagate(_ns(branch="A", yes=True))
+
+        (wt_A1 / "shared.txt").write_text("resolved")
+        repo.git("add", "shared.txt", cwd=wt_A1)
+        # An unrelated tracked file, edited but not staged: the whole trigger.
+        (wt_A1 / "a-only.txt").write_text("work in progress")
+
+        with pytest.raises(SystemExit) as exc:
+            cmd_propagate(_ns(branch="A"))
+
+        assert exc.value.code == 4
+        assert "A1 edits shared" in repo.git("log", "--oneline", "A1")
+        assert (wt_A1 / "a-only.txt").read_text() == "work in progress"
+        assert _has_active_rebase(wt_A1)  # still resumable once the edit is dealt with
+
     def test_resume_covers_named_branch_whole_subtree(self, repo: RepoHelper) -> None:
         # Resuming `propagate R` finishes the stuck child AND propagates the other drifted child.
         repo.commit("shared.txt", "original", "base shared")
@@ -713,6 +738,40 @@ class TestPropagateResumeGuards:
         assert exc.value.code == 4
         assert "not started by git-tree" in exc.value.message
         assert _has_active_rebase(wt_A1)  # left as-is
+
+    def test_named_branch_mid_am_is_refused(self, repo: RepoHelper, tmp_path) -> None:
+        """A `git am` in the NAMED branch's worktree must not be driven as if it were a resume.
+
+        `git am` uses `rebase-apply/` with no `onto` file, so ownership is unknowable.
+        `_require_clean_state` already treats that as foreign, but it only ever sees descendants;
+        the named branch reaches `_advance_branch` directly, which drove anything whose `onto`
+        could not be read.
+        """
+        repo.commit("shared.txt", "original", "base")
+        repo.git("branch", "A", "main")
+        repo.set_parent("A", "main")
+        wt_A = repo.worktree("A")
+        repo.git("branch", "A1", "A")
+        repo.set_parent("A1", "A")
+        repo.worktree("A1")
+
+        # A patch that cannot apply to A: both sides touch shared.txt differently.
+        repo.checkout("main")
+        repo.commit("shared.txt", "patch version", "patch edits shared")
+        repo.git("format-patch", "-1", "main", "-o", str(tmp_path / "patches"))
+        repo.git("reset", "--hard", "HEAD~1")
+        (wt_A / "shared.txt").write_text("A version")
+        repo.git("add", "shared.txt", cwd=wt_A)
+        repo.git("commit", "-m", "A edits shared", cwd=wt_A)
+
+        patch = next((tmp_path / "patches").glob("*.patch"))
+        repo.git("am", str(patch), cwd=wt_A, check=False)
+        assert _has_active_rebase(wt_A)  # rebase-apply/ is in progress
+
+        with pytest.raises(TreeError) as exc:
+            cmd_propagate(_ns(branch="A", yes=True))
+        assert exc.value.code == 4
+        assert _has_active_rebase(wt_A)  # the am is left for the user to finish or abort
 
     def test_resume_records_actual_replay_base_when_parent_moves(self, repo: RepoHelper) -> None:
         repo.commit("shared.txt", "original", "base")

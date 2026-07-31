@@ -1363,16 +1363,44 @@ def cmd_rebuild(args: argparse.Namespace) -> None:
 #    support (verified unreachable on git 2.39's default backend).
 
 
-def _skip_empty_commits(cwd: Path) -> str | None:
+def _replay_is_empty(cwd: Path) -> bool:
+    """Whether the stopped replay produced nothing: index == HEAD and worktree == index.
+
+    This is the precondition for `--skip`, which hard-resets. "No unmerged entries" is not the
+    same thing: a resolution the user staged, or an unrelated tracked edit, also leaves no
+    unmerged entries, and skipping there destroys it. Untracked files are deliberately not
+    consulted, since `--skip` does not touch them. Any non-zero exit, git failing included,
+    means "do not skip".
+    """
+    return git_ok("diff", "--quiet", "HEAD", cwd=cwd)
+
+
+def _refuse_unfinished_replay(branch: str, cwd: Path, resume_cmd: list[str]) -> NoReturn:
+    """The rebase stopped with no conflict but with changes present, so it cannot be skipped."""
+    files = git_lines("diff", "--name-only", "HEAD", cwd=cwd)
+    listed = "".join(f"\n  {f}" for f in files)
+    raise TreeError(
+        f"{branch}'s rebase in {cwd} is stopped with changes that are not a conflict:{listed}\n"
+        f"`git rebase --skip` would discard them. Commit or stash them (do not `git add` them, "
+        f"that folds them into the commit being replayed), then re-run: {' '.join(resume_cmd)}",
+        code=4,
+        branches=[branch],
+    )
+
+
+def _skip_empty_commits(cwd: Path, branch: str, resume_cmd: list[str]) -> str | None:
     """Loop --skip until rebase finishes or a real conflict appears. Returns None if
     a real conflict was hit (rebase left in progress for the user to resolve).
 
     Never aborts: a `--skip` that lands on a conflicting next commit is normal, so
-    leave the rebase resumable rather than discarding it.
+    leave the rebase resumable rather than discarding it. Refuses outright if the stop is not
+    an empty replay, since skipping would then throw work away.
     """
     while _has_active_rebase(cwd):
         if _has_unmerged(cwd):
             return None  # real conflict; leave rebase in progress
+        if not _replay_is_empty(cwd):
+            _refuse_unfinished_replay(branch, cwd, resume_cmd)
         if not git_echo_ok("rebase", "--skip", cwd=cwd):
             return None  # --skip surfaced a conflict / can't proceed; hand to user
     return "ok (skipped empty)"
@@ -1441,7 +1469,7 @@ def _drive_conflicted_rebase(
     replay recorded resolutions (`rerere`), stage them, and `--continue` until it finishes;
     otherwise stop for the user via `_conflict_exit`. Returns a status string on completion."""
     if not _has_unmerged(cwd):
-        status = _skip_empty_commits(cwd)
+        status = _skip_empty_commits(cwd, child, resume_cmd)
         if status is not None:
             return status
         _conflict_exit(child, parent, cwd, stashed, resume_cmd)
@@ -1467,7 +1495,7 @@ def _drive_conflicted_rebase(
 
         # --continue stopped again — new conflict or empty patch?
         if not _has_unmerged(cwd):
-            status = _skip_empty_commits(cwd)
+            status = _skip_empty_commits(cwd, child, resume_cmd)
             if status is not None:
                 return "ok (rerere)"
             _conflict_exit(child, parent, cwd, stashed, resume_cmd)
@@ -1546,6 +1574,23 @@ def _active_rebase_branch(cwd: Path) -> str | None:
     return None
 
 
+def _is_git_tree_rebase(cwd: Path, parent: str | None) -> bool:
+    """Whether the rebase in progress at `cwd` is git-tree's own, so it is safe to drive forward.
+
+    True only when the `onto` it was aimed at is an ancestor-or-equal of the branch's tree-parent,
+    which is what a cascade rebase looks like (the parent may have advanced since it started).
+    An `onto` that cannot be read means the owner is unknowable and the answer is no: `git am`
+    uses `rebase-apply/` with no `onto` file, and driving `--continue`/`--skip` at an am session
+    is not something git-tree should do.
+    """
+    if parent is None:
+        return False
+    actual_onto = _active_rebase_onto(cwd)
+    if not actual_onto:
+        return False
+    return git_ok("merge-base", "--is-ancestor", actual_onto, parent)
+
+
 def _has_unmerged(cwd: Path) -> bool:
     """True if the worktree has unmerged (conflicted) index entries."""
     return bool(git("ls-files", "--unmerged", cwd=cwd, check=False).strip())
@@ -1580,13 +1625,7 @@ def _require_clean_state(branches: list[str], graph: Graph, resume_cmd: list[str
             continue
         wt = info.worktree
         if _has_active_rebase(wt):
-            parent = graph.parent_of.get(b)
-            actual_onto = _active_rebase_onto(wt)
-            if (
-                parent is None
-                or not actual_onto
-                or not git_ok("merge-base", "--is-ancestor", actual_onto, parent)
-            ):
+            if not _is_git_tree_rebase(wt, graph.parent_of.get(b)):
                 foreign.append((b, wt))
             elif _has_unmerged(wt):
                 unresolved.append((b, wt))
@@ -1789,9 +1828,9 @@ def _advance_branch(
 
     # RESUME: an interrupted rebase is sitting in this worktree.
     actual_onto = _active_rebase_onto(cwd)
-    if actual_onto is not None and not git_ok("merge-base", "--is-ancestor", actual_onto, parent):
-        # Onto is unrelated to the tree-parent: this isn't git-tree's cascade rebase. Don't
-        # silently drive someone else's rebase to a base it wasn't aimed at.
+    if not _is_git_tree_rebase(cwd, parent):
+        # Not aimed at the tree-parent, or not readable at all. Either way it is not git-tree's
+        # cascade, so don't drive it to a base it was never aimed at.
         raise TreeError(
             f"{branch} has a rebase in progress that is not onto {parent} (git-tree did not "
             f"start it). Finish or `git rebase --abort` it in {cwd}.",
