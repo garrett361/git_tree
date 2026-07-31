@@ -55,12 +55,15 @@ git tree propagate <branch>
 
 No `-y`: a resume skips confirmation. Two things that do not work:
 
-- `git rebase --continue` by hand. git-tree finishes the rebase itself and records the fork commit
-  at the base actually replayed onto. Doing it by hand skips that bookkeeping.
+- `git rebase --continue` by hand. git-tree finishes the rebase itself, records the fork commit,
+  and lands the branch on its parent's current tip. Doing it by hand skips all of that.
 - A bare `git tree propagate` from inside the conflicted worktree. HEAD is detached mid-rebase, so
   it fails with `fatal: not on a branch (detached HEAD)` and no hint. Always name the branch.
 
-Repeat this section for each further conflict.
+Repeat this section for each further conflict. A resume finishes the interrupted rebase and then
+rebases the branch onto its parent's current tip, so commits the parent gained while you were
+resolving are picked up in the same run. That second step can conflict too; resolve it the same
+way.
 
 ## 4. Finish
 
@@ -69,32 +72,34 @@ Repeat this section for each further conflict.
   applies: run the `git stash apply <sha>` it prints, from that worktree. Use the SHA it gives
   you rather than `stash@{0}`, which is shared across every worktree in the repo and may point
   at a different one by now.
-- **A parent that moved during the pause.** A resume records the fork commit at the base actually
-  replayed onto, not the parent's current tip, so the branch can land behind the parent and look
-  finished. Re-run `git tree propagate <parent>`.
 
 Confirm `pending_from_parent` is 0 for the branches you touched.
 
 ## Refusals
 
 - `kind=unresolved_conflicts`: files still conflicted, or resolved but not `git add`ed.
-- `stopped with changes that are not a conflict`: the most likely one to hit on a resume. The
-  conflict is resolved and staged, but some other tracked file in that worktree is modified and
-  unstaged, so git refuses to continue and skipping would discard it. The message lists those
-  files; move them aside **by name**, then re-run the resume:
+- `stopped with unstaged changes that are not a conflict`: the most likely one to hit on a resume.
+  The conflict is resolved and staged, but some other tracked file in that worktree is modified and
+  unstaged, so git refuses to continue and skipping would discard it. The message lists exactly
+  those unstaged files and prints the stash command with them named, safe to run verbatim:
 
   ```sh
   git -C <worktree> stash push -- <file>...
   ```
 
-  Name the files. A bare `git stash push` also takes the staged conflict resolution, leaving an
-  empty index and an empty replay. And do not `git add` them: `--continue` commits whatever is
-  staged as the commit being replayed, so that folds unrelated work into someone else's commit.
+  Then re-run the resume. Keep the pathspec: a bare `git stash push` also takes the staged conflict
+  resolution, leaving an empty index and an empty replay. And do not `git add` these files:
+  `--continue` commits whatever is staged as the commit being replayed, so that folds unrelated
+  work into someone else's commit.
 - `an operation in progress that rebasing would discard`: a merge, cherry-pick, or revert is
   half-done in that worktree. Finish or abort it there, then re-run. Note this fires even when
   the user has already staged their resolutions, which is why nothing else caught it.
-- `a rebase not started by git-tree is in progress`: git-tree will not drive a hand-started
-  rebase, including a `git rebase -i` stopped at an `edit`. Finish it or `git rebase --abort` in
-  that worktree, then re-run.
+- `a rebase not started by git-tree is in progress` (a descendant), or `git-tree did not start it`
+  (the branch you named): git-tree will not drive a hand-started rebase, including a `git rebase
+  -i` stopped at an `edit`. The second form names why it was disowned, one of: it is interactive,
+  its base cannot be read (a `git am`), its base is neither the tree-parent nor an ancestor of it,
+  or the branch has no tree-parent. Finish it or `git rebase --abort` in that worktree, then
+  re-run. Do not read the base as the reason unless the message says so: a base that is an
+  ancestor of the tree-parent is normal and expected while a cascade is paused.
 - `These branches have corrupted submodule state`: follow the `git-tree-doctor` skill.
 - `These branches need worktrees`: `git worktree add <path> <branch>` for each, then re-run.

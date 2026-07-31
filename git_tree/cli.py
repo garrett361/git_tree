@@ -19,12 +19,7 @@ from typing import NoReturn
 
 
 class ErrorKind(StrEnum):
-    """The `error.kind` an agent branches on, from the JSON envelope.
-
-    A `StrEnum` so it reaches `json.dumps` and f-strings as the bare tag, while the tags
-    themselves stay closed: a member that does not exist fails at the raise site rather than
-    reaching a consumer as an unrecognised string.
-    """
+    """The `error.kind` value in the JSON error envelope."""
 
     ERROR = "error"
     USAGE = "usage"
@@ -1484,15 +1479,18 @@ def _refuse_unfinished_replay(
     branch: str, cwd: Path, stash: str | None, resume_cmd: list[str]
 ) -> NoReturn:
     """The rebase stopped with no conflict but with changes present, so it cannot be skipped."""
-    files = git_lines("diff", "--name-only", "HEAD", cwd=cwd)
-    # Name the paths in the suggested stash: a bare `git stash push` would also take the staged
-    # conflict resolution, and `git add` would fold these into the commit being replayed.
+    # Unstaged only (worktree vs index), not `diff HEAD`: those are the files that block
+    # `git rebase --continue`, and they are the only ones the advised stash may take. A pathspec
+    # built from `diff HEAD` would also list the staged conflict resolution, so running the advice
+    # verbatim would stash it, leave index == HEAD, and empty the replay.
+    files = git_lines("diff", "--name-only", cwd=cwd)
     paths = " ".join(files) or "<file>..."
     lines = [
-        f"{branch}'s rebase in {cwd} is stopped with changes that are not a conflict:",
+        f"{branch}'s rebase in {cwd} is stopped with unstaged changes that are not a conflict:",
         *(f"  {f}" for f in files),
-        "`git rebase --skip` would discard them. Move them aside, keeping any staged conflict",
-        f"resolution: git -C {cwd} stash push -- {paths}",
+        "`git rebase --continue` refuses while they are unstaged and `git rebase --skip` would",
+        "discard them. Move just these aside, leaving any staged conflict resolution in the index:",
+        f"    git -C {cwd} stash push -- {paths}",
         f"Then re-run: {' '.join(resume_cmd)}",
     ]
     if stash:
@@ -1725,11 +1723,7 @@ def _has_active_rebase_safe(cwd: Path) -> bool:
 
 
 class SequencerOp(StrEnum):
-    """A git operation that is neither a rebase nor a plain edit, named as the user would say it.
-
-    The values read as prose because they are interpolated straight into refusals; a `StrEnum`
-    keeps that convenience while leaving nothing for a caller to compare against by hand.
-    """
+    """A merge, cherry-pick, or revert left in progress."""
 
     MERGE = "merge"
     CHERRY_PICK = "cherry-pick"
@@ -1785,23 +1779,50 @@ def _is_interactive_rebase(cwd: Path) -> bool:
     return False
 
 
-def _is_git_tree_rebase(cwd: Path, parent: str | None) -> bool:
-    """Whether the rebase in progress at `cwd` is git-tree's own, so it is safe to drive forward.
+class ForeignRebase(StrEnum):
+    """Why a rebase in progress is not git-tree's own to drive forward."""
 
-    True only when the `onto` it was aimed at is an ancestor-or-equal of the branch's tree-parent,
-    which is what a cascade rebase looks like (the parent may have advanced since it started).
-    An `onto` that cannot be read means the owner is unknowable and the answer is no: `git am`
-    uses `rebase-apply/` with no `onto` file, and driving `--continue`/`--skip` at an am session
-    is not something git-tree should do.
+    NO_TREE_PARENT = "no-tree-parent"
+    INTERACTIVE = "interactive"
+    UNREADABLE_BASE = "unreadable-base"
+    UNRELATED_BASE = "unrelated-base"
+
+
+def _foreign_rebase_reason(cwd: Path, parent: str | None) -> ForeignRebase | None:
+    """Why the rebase in progress at `cwd` is not git-tree's to drive, or None when it is.
+
+    A cascade rebase aims at the branch's tree-parent, or at an earlier commit if the parent has
+    moved since. Anything else belongs to the user.
     """
     if parent is None:
-        return False
+        return ForeignRebase.NO_TREE_PARENT
     if _is_interactive_rebase(cwd):
-        return False
+        return ForeignRebase.INTERACTIVE
     actual_onto = _active_rebase_onto(cwd)
     if not actual_onto:
-        return False
-    return git_ok("merge-base", "--is-ancestor", actual_onto, parent)
+        # `git am` records no base, so ownership is unknowable and git-tree keeps its hands off.
+        return ForeignRebase.UNREADABLE_BASE
+    if not git_ok("merge-base", "--is-ancestor", actual_onto, parent):
+        return ForeignRebase.UNRELATED_BASE
+    return None
+
+
+def _foreign_rebase_phrase(reason: ForeignRebase, parent: str | None) -> str:
+    """Turn a reason into wording for the error message."""
+    match reason:
+        case ForeignRebase.NO_TREE_PARENT:
+            return "the branch has no tree-parent to rebase onto"
+        case ForeignRebase.INTERACTIVE:
+            return "it is an interactive rebase, not a cascade"
+        case ForeignRebase.UNREADABLE_BASE:
+            return "its base cannot be read (a `git am` records none)"
+        case ForeignRebase.UNRELATED_BASE:
+            return f"its base is neither {parent} nor an ancestor of it"
+
+
+def _is_git_tree_rebase(cwd: Path, parent: str | None) -> bool:
+    """Whether the rebase in progress at `cwd` is git-tree's own, so it is safe to drive forward."""
+    return _foreign_rebase_reason(cwd, parent) is None
 
 
 def _has_unmerged(cwd: Path) -> bool:
@@ -2054,10 +2075,12 @@ def _advance_branch(
     auto_rerere: bool,
     resume_cmd: list[str],
 ) -> RebaseResult:
-    """Make `branch` rebased onto `parent`: *finish* an in-progress rebase if one is active
-    in its worktree (a resume), else *start* a fresh rebase (`_rebase_branch`). The finish
-    path replays no stash and records the fork at the commit the rebase actually replayed
-    onto, so it stays correct even if `parent` advanced since the rebase began."""
+    """Make `branch` rebased onto `parent`.
+
+    Finishes an in-progress rebase if one is active in its worktree, else starts a fresh one.
+    After finishing, it rebases onto `parent` as usual, so a parent that moved while the rebase
+    was interrupted still reaches `branch`.
+    """
     cwd = info.worktree
     assert cwd is not None
     if not _has_active_rebase(cwd):
@@ -2066,16 +2089,17 @@ def _advance_branch(
         )
 
     # RESUME: an interrupted rebase is sitting in this worktree.
-    actual_onto = _active_rebase_onto(cwd)
-    if not _is_git_tree_rebase(cwd, parent):
-        # Not aimed at the tree-parent, or not readable at all. Either way it is not git-tree's
-        # cascade, so don't drive it to a base it was never aimed at.
+    if (reason := _foreign_rebase_reason(cwd, parent)) is not None:
+        # Not git-tree's cascade, so don't drive it to a base it was never aimed at.
         raise TreeError(
-            f"{branch} has a rebase in progress that is not onto {parent} (git-tree did not "
-            f"start it). Finish or `git rebase --abort` it in {cwd}.",
+            f"{branch} has a rebase in progress in {cwd}: "
+            f"{_foreign_rebase_phrase(reason, parent)} (git-tree did not start it). "
+            f"Finish or `git rebase --abort` it there.",
             code=4,
             branches=[branch],
         )
+    actual_onto = _active_rebase_onto(cwd)
+    assert actual_onto is not None  # a readable base is part of the ownership test above
     if _has_unmerged(cwd):
         raise TreeError(
             f"{branch} still has unresolved conflicts in {cwd}. Resolve them and `git add` the "
@@ -2090,10 +2114,19 @@ def _advance_branch(
         # `--continue` stopped again: a later commit conflicts (drive it through rerere the same
         # way a fresh rebase does), or it resolved to an empty patch to skip. Never stashes here.
         _drive_conflicted_rebase(branch, parent, cwd, None, auto_rerere, resume_cmd, rr)
-    # Record the fork at the base the rebase actually replayed onto (may predate a since-moved
-    # `parent`); merge-base fallback in _get_fork_commit self-heals if it ever drifts.
-    _set_fork_commit(branch, actual_onto or git("rev-parse", parent))
-    return RebaseResult("resumed", pop_conflicted=False)
+    # Record the fork at the base the rebase actually replayed onto, which is where those commits
+    # really landed. Naming `parent` instead would set an exclude boundary above `branch` and the
+    # rebase below would replay nothing, dropping the branch's own commits. This is an
+    # intermediate value that only has to survive a conflict in that rebase.
+    _set_fork_commit(branch, actual_onto)
+    # `parent` may have gained commits while the rebase sat interrupted, so finishing it leaves
+    # `branch` behind. The ordinary propagate step from the base just recorded lands it on the
+    # live parent and moves the fork with it (a no-op when `parent` did not move). It can conflict
+    # in its own right, and raises through the same machinery, so `resume_cmd` still resumes it.
+    onto_live = _rebase_branch(
+        branch, parent, actual_onto, info, auto_rerere=auto_rerere, resume_cmd=resume_cmd
+    )
+    return RebaseResult("resumed", pop_conflicted=onto_live.pop_conflicted)
 
 
 def _resume_cmd(branch: str) -> list[str]:

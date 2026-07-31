@@ -685,11 +685,6 @@ class TestPropagateResumeScope:
         assert "A1 edits shared" in repo.git("log", "--oneline", "A1")
         assert (wt_A1 / "shared.txt").read_text() == "resolved"
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="the advised stash pathspec is built from `git diff --name-only HEAD`, which "
-        "includes the staged resolution, so running it empties the replay",
-    )
     def test_following_the_printed_advice_keeps_the_commit(self, repo: RepoHelper) -> None:
         """The command the refusal prints has to be safe to run verbatim.
 
@@ -904,11 +899,6 @@ class TestPropagateResumeGuards:
         assert "git-tree did not start it" in exc.value.message
         assert _has_active_rebase(wt_A)  # the am is left for the user to finish or abort
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="the resume returns at the base the rebase began at instead of falling through to "
-        "the ordinary propagate step, so the child keeps drift the run should have removed",
-    )
     def test_resume_leaves_the_child_on_the_live_parent(self, repo: RepoHelper) -> None:
         """Committing to the parent while resolving a conflict is ordinary, and drift by itself is
         legal. What is not legal is a `propagate` that exits ok having left drift it could remove.
@@ -959,11 +949,6 @@ class TestPropagateResumeGuards:
         # the parent tip while A1 still sits below it would replay nothing.
         assert "A1 edits shared" in repo.git("log", "--oneline", "A1")
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="the refusal always says `not onto <parent>`, which is false when the rebase was "
-        "refused for being the user's own interactive session",
-    )
     def test_interactive_refusal_does_not_misreport_the_base(self, repo: RepoHelper) -> None:
         """A wrong reason sends the user to check something that is already correct.
 
