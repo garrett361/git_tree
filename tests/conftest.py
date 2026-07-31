@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import argparse
 import os
+import shlex
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -99,6 +101,23 @@ class RepoHelper:
     def enable_rerere(self) -> None:
         self.git("config", "rerere.enabled", "true")
         self.git("config", "core.editor", "true")
+
+    def rebase_interactive(self, worktree: Path, onto: str, verb: str) -> None:
+        """Hand-run `git rebase -i <onto>` in `worktree`, rewriting the first `pick` to `verb`.
+
+        The sequence editor is a Python snippet rather than `sed -i`, whose in-place flag differs
+        between BSD and GNU. Stops at that step, which is how a user reaches an in-progress amend.
+        """
+        rewrite = (
+            "import pathlib,sys;p=pathlib.Path(sys.argv[1]);"
+            f"p.write_text(p.read_text().replace('pick', {verb!r}, 1))"
+        )
+        env = {
+            **os.environ,
+            "GIT_SEQUENCE_EDITOR": f"{sys.executable} -c {shlex.quote(rewrite)}",
+            "GIT_EDITOR": "true",
+        }
+        _git("rebase", "-i", onto, cwd=worktree, check=False, env=env)
 
     def stop_rebase_clean(self, worktree: Path, onto: str, filename: str) -> None:
         """Leave `worktree` mid-rebase onto `onto` with a clean `git status`.

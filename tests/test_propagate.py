@@ -739,6 +739,76 @@ class TestPropagateResumeGuards:
         assert "not started by git-tree" in exc.value.message
         assert _has_active_rebase(wt_A1)  # left as-is
 
+    def test_mid_merge_is_refused(self, repo: RepoHelper) -> None:
+        """A merge stopped with `--no-commit` must not be silently thrown away.
+
+        Once resolutions are staged, status shows `M ` rather than `UU`, so the conflicted-files
+        check never fires, and `_rebase_branch`'s unconditional `git stash push` clears
+        `MERGE_HEAD` along with the rest of the sequencer state. The merge cannot be continued
+        afterwards.
+        """
+        repo.commit("shared.txt", "base", "base")
+        repo.git("branch", "A", "main")
+        repo.set_parent("A", "main")
+        wt_A = repo.worktree("A")
+        (wt_A / "a.txt").write_text("a")
+        repo.git("add", "a.txt", cwd=wt_A)
+        repo.git("commit", "-m", "A adds a", cwd=wt_A)
+        repo.git("branch", "A1", "A")
+        repo.set_parent("A1", "A")
+        wt_A1 = repo.worktree("A1")
+        (wt_A1 / "a1.txt").write_text("a1")
+        repo.git("add", "a1.txt", cwd=wt_A1)
+        repo.git("commit", "-m", "A1 adds a1", cwd=wt_A1)
+
+        # A side branch A1 is mid-merging. Disjoint files, so it stages cleanly: no `UU`.
+        repo.git("branch", "side", "A")
+        wt_side = repo.worktree("side")
+        (wt_side / "side.txt").write_text("side")
+        repo.git("add", "side.txt", cwd=wt_side)
+        repo.git("commit", "-m", "side adds side", cwd=wt_side)
+        repo.git("merge", "--no-commit", "--no-ff", "side", cwd=wt_A1, check=False)
+        assert (wt_A1 / ".git").exists()
+
+        with pytest.raises(TreeError) as exc:
+            cmd_propagate(_ns(branch="A", yes=True))
+
+        assert exc.value.code == 4
+        assert "side.txt" in repo.git("status", "--porcelain", cwd=wt_A1)
+
+    def test_hand_run_interactive_rebase_is_refused(self, repo: RepoHelper) -> None:
+        """A user's own `git rebase -i <parent>` must not be adopted and driven to completion.
+
+        Its `onto` equals the tree-parent, so the ownership test alone cannot tell it apart from
+        git-tree's own cascade. Driving it finishes someone else's rebase past every stop point
+        and then reports `resumed`, even though the branch never received the parent's commit.
+        """
+        repo.commit("shared.txt", "base", "base")
+        repo.git("branch", "A", "main")
+        repo.set_parent("A", "main")
+        wt_A = repo.worktree("A")
+        (wt_A / "a.txt").write_text("one")
+        repo.git("add", "a.txt", cwd=wt_A)
+        repo.git("commit", "-m", "A adds a", cwd=wt_A)
+        repo.git("branch", "A1", "A")
+        repo.set_parent("A1", "A")
+        wt_A1 = repo.worktree("A1")
+        (wt_A1 / "a1.txt").write_text("a1")
+        repo.git("add", "a1.txt", cwd=wt_A1)
+        repo.git("commit", "-m", "A1 adds a1", cwd=wt_A1)
+
+        # Stopped at an `edit` with a clean worktree: the user has not started rewriting yet, so
+        # nothing is dirty and the empty-replay guard does not apply. Driving on from here
+        # finishes their rebase for them.
+        repo.rebase_interactive(wt_A1, "A", "edit")
+        assert _has_active_rebase(wt_A1)
+
+        with pytest.raises(TreeError) as exc:
+            cmd_propagate(_ns(branch="A", yes=True))
+
+        assert exc.value.code == 4
+        assert _has_active_rebase(wt_A1)  # still theirs to finish or abort
+
     def test_named_branch_mid_am_is_refused(self, repo: RepoHelper, tmp_path) -> None:
         """A `git am` in the NAMED branch's worktree must not be driven as if it were a resume.
 

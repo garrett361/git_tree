@@ -178,14 +178,21 @@ class WorktreeStatus:
     dirty: bool  # any porcelain output at all
 
 
-def _worktree_status(wt: Path, *, ignore_submodules: str | None = None) -> WorktreeStatus:
+def _worktree_status(
+    wt: Path, *, ignore_submodules: str | None = None, untracked_files: str | None = None
+) -> WorktreeStatus:
     """Run `git status --porcelain` once and tally its XY codes.
 
     `ignore_submodules` (e.g. "none") is passed to git as `--ignore-submodules=<val>`,
     overriding the repo's `diff.ignoreSubmodules` / `submodule.<name>.ignore` config for this
     one check so a caller that must not miss dirty submodules can force them to be reported.
+    `untracked_files` does the same for `status.showUntrackedFiles`. Both default to off: display
+    and `--json` should report what the user's own config says, while a caller deciding whether
+    deleting a worktree would destroy work must not inherit a setting that hides files.
     """
     extra = [f"--ignore-submodules={ignore_submodules}"] if ignore_submodules is not None else []
+    if untracked_files is not None:
+        extra.append(f"--untracked-files={untracked_files}")
     out = git("status", "--porcelain", *extra, cwd=wt)
     staged = modified = untracked = conflicted = 0
     for line in out.splitlines():
@@ -1063,12 +1070,14 @@ def _remove_blocking_dirt(wt: Path) -> bool:
 
     Force-removal bypasses git's own dirty/submodule refusals, so this is the sole backstop
     and is deliberately conservative: `--ignore-submodules=none` overrides any submodule-ignore
-    config; `foreach --recursive` reaches every depth; a populated-but-uninitialized submodule
+    config, and `--untracked-files=normal` overrides `status.showUntrackedFiles`, which is a
+    common large-repo perf setting that would otherwise hide the files this protects;
+    `foreach --recursive` reaches every depth; a populated-but-uninitialized submodule
     (which `foreach` skips) and an inner `git status` that errors both count as "cannot prove
     clean". `--quiet` drops foreach's translated "Entering '<path>'" banner so any remaining
     stdout is real dirt.
     """
-    if _worktree_status(wt, ignore_submodules="none").dirty:
+    if _worktree_status(wt, ignore_submodules="none", untracked_files="normal").dirty:
         return True
     for sub in _submodule_paths(wt):
         d = wt / sub
@@ -1083,7 +1092,7 @@ def _remove_blocking_dirt(wt: Path) -> bool:
         "--quiet",
         "foreach",
         "--recursive",
-        "git status --porcelain --ignore-submodules=none",
+        "git status --porcelain --ignore-submodules=none --untracked-files=normal",
         cwd=wt,
         check=False,
     )
@@ -1643,6 +1652,49 @@ def _has_active_rebase_safe(cwd: Path) -> bool:
         return False
 
 
+_SEQUENCER_STATES = {
+    "MERGE_HEAD": "merge",
+    "CHERRY_PICK_HEAD": "cherry-pick",
+    "REVERT_HEAD": "revert",
+    "sequencer": "cherry-pick or revert",
+}
+
+
+def _pending_sequencer_op(cwd: Path) -> str | None:
+    """The merge, cherry-pick, or revert left in progress in `cwd`, by name, else None.
+
+    Nothing else notices these. Once the user stages their resolutions `git status` reports
+    ordinary staged changes rather than `UU`, and `_rebase_branch`'s unconditional `git stash
+    push` then clears the state outright, leaving an operation that cannot be continued.
+    `sequencer/` catches a multi-commit cherry-pick, which has no `CHERRY_PICK_HEAD` between
+    picks. Paths come from `--git-path` because they live in the per-worktree gitdir.
+    """
+    for name, label in _SEQUENCER_STATES.items():
+        rel = git("rev-parse", "--git-path", name, cwd=cwd, check=False)
+        if rel and (cwd / rel).exists():
+            return label
+    return None
+
+
+def _is_interactive_rebase(cwd: Path) -> bool:
+    """Whether the in-progress rebase is one the user started with `git rebase -i`.
+
+    Not to be confused with git's `rebase-merge/interactive` marker file, which is useless here:
+    the merge backend writes it for every rebase, git-tree's own included, so keying on it would
+    refuse every cascade. Two things do tell them apart. `amend` exists only while stopped at an
+    `edit` or `reword`. And git-tree's todo is machine-generated, so every verb in it is `pick`;
+    any other verb was typed by a person.
+    """
+    if _rebase_state_file(cwd, "amend") is not None:
+        return True
+    for name in ("done", "git-rebase-todo"):
+        for line in (_rebase_state_file(cwd, name) or "").splitlines():
+            verb = line.strip().split(" ")[0]
+            if verb and not verb.startswith("#") and verb not in ("pick", "p"):
+                return True
+    return False
+
+
 def _is_git_tree_rebase(cwd: Path, parent: str | None) -> bool:
     """Whether the rebase in progress at `cwd` is git-tree's own, so it is safe to drive forward.
 
@@ -1653,6 +1705,8 @@ def _is_git_tree_rebase(cwd: Path, parent: str | None) -> bool:
     is not something git-tree should do.
     """
     if parent is None:
+        return False
+    if _is_interactive_rebase(cwd):
         return False
     actual_onto = _active_rebase_onto(cwd)
     if not actual_onto:
@@ -1688,6 +1742,7 @@ def _require_clean_state(branches: list[str], graph: Graph, resume_cmd: list[str
     # Plain dirty (no conflict, no rebase) still passes: `_rebase_branch` stashes it.
     unresolved: list[tuple[str, Path]] = []
     foreign: list[tuple[str, Path]] = []
+    pending: list[tuple[str, Path, str]] = []
     for b in branches:
         info = graph.branches.get(b)
         if not info or not info.worktree:
@@ -1699,8 +1754,18 @@ def _require_clean_state(branches: list[str], graph: Graph, resume_cmd: list[str
             elif _has_unmerged(wt):
                 unresolved.append((b, wt))
             # else: a clean, git-tree-owned mid-rebase — allow (it will be finished).
+        elif (op := _pending_sequencer_op(wt)) is not None:
+            pending.append((b, wt, op))
         elif _worktree_status(wt).conflicted:
             unresolved.append((b, wt))
+    if pending:
+        raise TreeError(
+            "These branches have an operation in progress that rebasing would discard:\n"
+            + "\n".join(f"  {b}  (a {op} is in progress in: {wt})" for b, wt, op in pending)
+            + "\n\nFinish or abort it there, then re-run.",
+            code=4,
+            branches=[b for b, _, _ in pending],
+        )
     if unresolved and not foreign:
         lines = [
             "Resolve the conflicts and `git add` them, then re-run:",
@@ -2236,11 +2301,21 @@ def _split_child(
         raise SystemExit(1)
 
     # The rewind resets the worktree, so refuse tracked changes (untracked survive it).
-    st = _worktree_status(Path(git("rev-parse", "--show-toplevel")))
+    top = Path(git("rev-parse", "--show-toplevel"))
+    st = _worktree_status(top)
     if st.staged or st.modified or st.conflicted:
         raise TreeError(
             f"{branch} has uncommitted changes; --child rewinds the worktree to the split "
             f"commit. Commit or stash them first.",
+            code=4,
+        )
+    # A merge or cherry-pick whose resolutions are staged looks clean to the check above once
+    # they are staged, and `reset --hard` would drop its state silently. Unlike a mid-rebase,
+    # which detaches HEAD and so never reaches here, these keep HEAD attached.
+    if (op := _pending_sequencer_op(top)) is not None:
+        raise TreeError(
+            f"{branch} has a {op} in progress in {top}; --child rewinds the worktree and would "
+            f"discard it. Finish or abort it first.",
             code=4,
         )
 

@@ -248,3 +248,26 @@ class TestRemoveMidRebase:
         wt = self._stopped(repo, tmp_path)
         cmd_remove(cli_args(branch="A", yes=True, force=True))
         assert not wt.exists()
+
+
+class TestRemoveUntrackedConfig:
+    def test_untracked_work_blocks_removal_despite_status_config(
+        self, repo: RepoHelper, tmp_path
+    ) -> None:
+        """`status.showUntrackedFiles=no` must not disarm the gate.
+
+        It is a common large-repo perf setting, often global. The dirt gate already overrides the
+        parallel `submodule.<n>.ignore` axis with `--ignore-submodules=none`; untracked files are
+        the same idea, and `remove` force-deletes the directory, so a hidden untracked file is
+        unrecoverable.
+        """
+        repo.branch("A", parent="main")
+        wt = repo.worktree("A", str(tmp_path / "wt-A"))
+        repo.git("config", "status.showUntrackedFiles", "no")
+        (wt / "notes.txt").write_text("UNTRACKED WORK")
+        assert repo.git("status", "--porcelain", cwd=wt) == ""  # hidden from a bare status
+
+        with pytest.raises(TreeError) as exc:
+            cmd_remove(_ns(branch="A", yes=True))
+        assert exc.value.code == 4
+        assert (wt / "notes.txt").read_text() == "UNTRACKED WORK"
