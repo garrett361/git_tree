@@ -81,7 +81,7 @@ class TestConflictResume:
 
 class TestSplitAfterRewrite:
     def test_split_after_parent_rewrite_propagates_correctly(
-        self, repo: RepoHelper, monkeypatch, tmp_path
+        self, repo: RepoHelper, monkeypatch, pick_fzf, tmp_path
     ) -> None:
         """Rewrite a parent's commits (here via amend, as a reorder/edit would),
         split it, then propagate. The child replays only its own commit."""
@@ -105,7 +105,7 @@ class TestSplitAfterRewrite:
 
         # Split A at A1 into a new parent E.
         a1_line = repo.git("log", "--oneline", "--reverse", "main..A").splitlines()[0]
-        monkeypatch.setattr("git_tree.cli.fzf_select", lambda items, **kw: [a1_line])
+        pick_fzf(a1_line)
         inputs = iter(["E", "n"])
         monkeypatch.setattr("builtins.input", lambda _: next(inputs))
         monkeypatch.chdir(wt_a)
@@ -224,7 +224,7 @@ class TestForkCommitLifecycle:
         cmd_attach(cli_args(command="attach", parent="main"))
         assert repo.git("config", "branch.feat.tree-fork-commit") == expected
 
-    def test_set_on_split(self, repo: RepoHelper, monkeypatch) -> None:
+    def test_set_on_split(self, repo: RepoHelper, monkeypatch, pick_fzf) -> None:
         repo.git("branch", "feat", "main")
         repo.set_parent("feat", "main")
         repo.checkout("feat")
@@ -234,7 +234,7 @@ class TestForkCommitLifecycle:
 
         split_line = repo.git("log", "--oneline", "--reverse", "main..feat").splitlines()[0]
         boundary = repo.git("rev-parse", split_line.split()[0])
-        monkeypatch.setattr("git_tree.cli.fzf_select", lambda items, **kw: [split_line])
+        pick_fzf(split_line)
         inputs = iter(["feat-base", "n"])
         monkeypatch.setattr("builtins.input", lambda _: next(inputs))
         cmd_split(cli_args(command="split"))

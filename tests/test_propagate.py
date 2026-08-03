@@ -37,7 +37,7 @@ class TestPropagate:
         repo.checkout("main")
         repo.commit("a2.txt", "a2", "new commit on main")
 
-        monkeypatch.setattr("git_tree.cli.confirm", _no_confirm)
+        monkeypatch.setattr("builtins.input", _no_confirm)
         cmd_propagate(_ns(yes=True))
 
         assert "new commit on main" in repo.git("log", "--oneline", "b")
@@ -162,7 +162,7 @@ class TestPropagate:
 
         b_tip_before = repo.git("rev-parse", "b")
         # dry-run overrides --yes: preview only, confirm never consulted, no cascade.
-        monkeypatch.setattr("git_tree.cli.confirm", _no_confirm)
+        monkeypatch.setattr("builtins.input", _no_confirm)
         cmd_propagate(_ns(dry_run=True, yes=True))
 
         assert repo.git("rev-parse", "b") == b_tip_before

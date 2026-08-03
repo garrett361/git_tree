@@ -109,7 +109,7 @@ class TestDetach:
         def _no_confirm(_message: str) -> bool:
             raise AssertionError("confirm should not be consulted with --yes")
 
-        monkeypatch.setattr("git_tree.cli.confirm", _no_confirm)
+        monkeypatch.setattr("builtins.input", _no_confirm)
         cmd_detach(_ns(branch="feature", yes=True))
 
         assert self._branch_config(repo, "feature").returncode != 0

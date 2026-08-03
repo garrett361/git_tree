@@ -340,8 +340,8 @@ of `["git","tree","propagate",<branch>]`, and re-running that argv finishes the 
 
 ## Current state
 
-Not started. Begin at step 0. This section is updated with every step's commit, so a migration
-interrupted between sessions can be resumed from it.
+**Step 0 done** (the test-only seam). Next: step 1, `_render.py`. This section is updated with
+every step's commit, so a migration interrupted between sessions can be resumed from it.
 
 Baseline re-verified at commit `d727b82`, unchanged since `594e3cf`: 144 top-level names in
 `cli.py` (3493 lines); full gate green at 292 passed, 5 xfailed; all four goldens and the three

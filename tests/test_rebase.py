@@ -36,7 +36,7 @@ class TestRebase:
         repo.git("commit", "-m", "feature commit", cwd=wt)
         monkeypatch.chdir(wt)
 
-        monkeypatch.setattr("git_tree.cli.confirm", _no_confirm)
+        monkeypatch.setattr("builtins.input", _no_confirm)
         cmd_rebase(_ns(target="main", yes=True))
 
         log = repo.git("log", "--oneline", "feature")

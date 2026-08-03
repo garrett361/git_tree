@@ -7,7 +7,7 @@ import pytest
 
 from git_tree.cli import TreeError, _has_active_rebase, cmd_remove, discover, main
 
-from .conftest import RepoHelper, cli_args, stopped_rebase
+from .conftest import FZF_SELECT, RepoHelper, cli_args, stopped_rebase
 
 
 def _ns(branch: str | None = None, yes: bool = False) -> object:
@@ -30,7 +30,7 @@ class TestRemove:
         repo.git("add", "a.txt", cwd=wt)
         repo.git("commit", "-m", "a work", cwd=wt)
 
-        monkeypatch.setattr("git_tree.cli.confirm", _no_confirm)
+        monkeypatch.setattr("builtins.input", _no_confirm)
         cmd_remove(_ns("A", yes=True))
 
         assert not wt.exists()
@@ -191,7 +191,7 @@ class TestRemove:
             captured["items"] = items
             return ["B"]
 
-        monkeypatch.setattr("git_tree.cli.fzf_select", fake_fzf)
+        monkeypatch.setattr(FZF_SELECT, fake_fzf)
         monkeypatch.setattr("builtins.input", lambda _: "y")
         cmd_remove(_ns())  # no branch arg
 
@@ -204,10 +204,10 @@ class TestRemove:
             cmd_remove(_ns())  # only main, no tree-branch worktrees
         assert "No tree-branch worktrees available" in capsys.readouterr().err
 
-    def test_no_arg_cancel_removes_nothing(self, repo: RepoHelper, monkeypatch, tmp_path) -> None:
+    def test_no_arg_cancel_removes_nothing(self, repo: RepoHelper, pick_fzf, tmp_path) -> None:
         repo.branch("A", parent="main")
         repo.worktree("A", str(tmp_path / "wt-A"))
-        monkeypatch.setattr("git_tree.cli.fzf_select", lambda items, **kw: [])  # cancelled
+        pick_fzf()  # cancelled
 
         with pytest.raises(SystemExit):
             cmd_remove(_ns())

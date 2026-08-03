@@ -48,7 +48,7 @@ class TestPush:
         repo.git("commit", "-m", "b commit", cwd=wt_b)
         monkeypatch.chdir(wt_b)
 
-        monkeypatch.setattr("git_tree.cli.confirm", _no_confirm)
+        monkeypatch.setattr("builtins.input", _no_confirm)
         cmd_push(_ns(yes=True))
 
         assert "refs/heads/b" in repo.git("ls-remote", "--heads", str(repo.origin))

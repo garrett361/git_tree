@@ -6,10 +6,15 @@ import shlex
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+
+FZF_SELECT = "git_tree.cli.fzf_select"
+"""Monkeypatch target for the fzf picker, named once so tests don't each hard-code the module
+a production function happens to live in."""
 
 
 def cli_args(**overrides: object) -> argparse.Namespace:
@@ -261,3 +266,23 @@ def repo(
     helper = RepoHelper(work=work, origin=origin)
     monkeypatch.chdir(work)
     return helper
+
+
+@pytest.fixture
+def no_fzf(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail the test if the fzf picker is consulted at all."""
+
+    def _refuse(*_args: object, **_kwargs: object) -> list[str]:
+        raise AssertionError("fzf picker should not be consulted")
+
+    monkeypatch.setattr(FZF_SELECT, _refuse)
+
+
+@pytest.fixture
+def pick_fzf(monkeypatch: pytest.MonkeyPatch) -> Callable[..., None]:
+    """Stub the fzf picker to return `chosen`; call with no arguments for a cancelled pick."""
+
+    def _pick(*chosen: str) -> None:
+        monkeypatch.setattr(FZF_SELECT, lambda items, **kw: list(chosen))
+
+    return _pick
