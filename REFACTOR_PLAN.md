@@ -345,7 +345,12 @@ of `["git","tree","propagate",<branch>]`, and re-running that argv finishes the 
 
 ## Current state
 
-**Steps 0-6 done** (test-only seam, then `_render`, `_errors`, `_prompt`, `_git`, `_graph`, `_display`, `_guards`, `_engine`, `_cmd_skills`). Next: steps 10-20, the eleven command modules. This section is updated with
+**Steps 0-6 done** (test-only seam, then `_render`, `_errors`, `_prompt`, `_git`, `_graph`, `_display`, `_guards`, `_engine`, `_cmd_skills`), plus the five leaf command modules. Next: the destructive commands
+(`_cmd_remove`, `_cmd_rebuild`, `_cmd_push`), then the cascade commands.
+
+Steps 10-20 land as three batch commits rather than eleven: one subagent run produces all of a
+batch's modules in a single working-tree state, and splitting that into per-module commits would
+mean hand-splitting `cli.py`'s hunks and stashing to gate each intermediate state. This section is updated with
 every step's commit, so a migration interrupted between sessions can be resumed from it.
 
 Baseline re-verified at commit `d727b82`, unchanged since `594e3cf`: 144 top-level names in

@@ -11,8 +11,13 @@ from importlib import metadata
 from pathlib import Path
 from typing import NoReturn
 
+from git_tree._cmd_attach import cmd_attach
+from git_tree._cmd_branch import cmd_branch
+from git_tree._cmd_detach import cmd_detach
+from git_tree._cmd_log import cmd_log
 from git_tree._cmd_skills import cmd_skills
-from git_tree._display import _hydrate, _subtree_lines, _tree_json, format_tree
+from git_tree._cmd_tree import cmd_tree
+from git_tree._display import _subtree_lines, format_tree
 from git_tree._engine import (
     _advance_branch,
     _auto_rerere,
@@ -29,14 +34,11 @@ from git_tree._git import (
     _has_active_rebase,
     _has_active_rebase_safe,
     _init_submodules,
-    _init_submodules_or_warn,
     _is_git_tree_rebase,
-    _is_tree_branch,
     _pending_sequencer_op,
     _register_child,
     _set_fork_commit,
     _unset_tree_config,
-    _use_color,
     _worktree_status,
     _would_cycle,
     all_branch_names,
@@ -52,7 +54,6 @@ from git_tree._graph import (
     _root_remote,
     discover,
     root_of,
-    roots,
 )
 from git_tree._guards import (
     _mid_rebase_branches,
@@ -81,137 +82,6 @@ def _version() -> str:
 # ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
-
-
-def cmd_tree(args: argparse.Namespace) -> dict | None:
-    graph = discover()
-    if args.json:
-        _hydrate(graph, list(graph.branches))
-        # Always the full forest, regardless of current branch or --all: an agent querying
-        # state usually isn't "on" a tree branch, and JSON has no clutter cost. Returned (not
-        # printed) so main() wraps it in the envelope and writes it to the real stdout.
-        return _tree_json(graph)
-    raw = git("rev-parse", "--abbrev-ref", "HEAD", check=False)
-    current = None if (not raw or raw == "HEAD") else raw
-
-    all_roots = roots(graph)
-    if args.all:
-        # A root is a tree-branch with children but no tracked parent; show every one,
-        # including stacks whose base isn't main (otherwise invisible).
-        to_show = all_roots
-    elif current and (current in graph.parent_of or current in graph.children_of):
-        # Default: just the tree containing the current branch.
-        to_show = [root_of(graph, current)]
-    else:
-        to_show = []
-
-    if to_show:
-        rendered = [b for r in to_show for b in (r, *graph.downstream_from(r))]
-        _hydrate(graph, rendered)
-        blocks = [format_tree(graph, root=r, current=current, show_counts=True) for r in to_show]
-        print("\n\n".join(blocks))
-    elif not all_roots:
-        print("  (no tree-branches registered — use `git tree attach` or `git tree branch`)")
-    else:
-        print("Not on a tree-branch. Use `git tree --all` to see all trees.")
-
-
-def cmd_branch(args: argparse.Namespace) -> None:
-    parent = current_branch()
-    name: str = args.name
-    path: str = args.path
-
-    if not git_ok("rev-parse", "--verify", "--quiet", f"refs/heads/{name}"):
-        # New branch: create it at the current tip, parented here.
-        if not git_echo_ok("worktree", "add", path, "-b", name):
-            raise TreeError(f"failed to create worktree at {path}")
-        git("config", f"branch.{name}.tree-parent-branch", parent)
-        _set_fork_commit(name, git("rev-parse", parent))
-        if not args.no_submodule_init:
-            _init_submodules_or_warn(path)
-        print(f"Created branch {name} with worktree at {path} (parent: {parent})")
-        return
-
-    # Existing branch: adopt it into the tree under the current branch and give it a
-    # worktree. Validate before creating the worktree so a rejected adopt leaves nothing
-    # behind; refuse one already in the tree (use plain `git worktree add` for just a
-    # worktree, which `git tree` then discovers).
-    if name == parent:
-        raise TreeError(f"Cannot make {name} its own parent.")
-    if _is_tree_branch(name):
-        raise TreeError(
-            f"{name} is already a tree-branch. Run `git worktree add {path} {name}` to give "
-            f"it a worktree (git tree discovers it automatically)."
-        )
-    base = git("merge-base", parent, name, check=False)
-    if not base:
-        raise TreeError(f"No common history between {parent} and {name}.")
-
-    if not git_echo_ok("worktree", "add", path, name):
-        raise TreeError(f"failed to create worktree at {path}")
-    _register_child(name, parent, fork=base)
-    if not args.no_submodule_init:
-        _init_submodules_or_warn(path)
-    print(f"Adopted existing branch {name} with worktree at {path} (parent: {parent})")
-
-
-def cmd_attach(args: argparse.Namespace) -> None:
-    branch = current_branch()
-    parent: str | None = args.parent
-
-    if not parent:
-        _require_input(args, "parent branch", "the parent argument")
-        candidates = [b for b in all_branch_names() if b != branch]
-        if not candidates:
-            raise TreeError("No other branches available.")
-        parent = _select_one(candidates, prompt="Select parent> ", header="Choose parent branch")
-
-    if parent == branch:
-        raise TreeError(f"Cannot attach {branch} to itself.")
-    if _would_cycle(branch, parent):
-        raise TreeError(
-            f"Cannot attach {branch} to {parent}: {parent} descends from {branch} "
-            f"in the tree (would create a cycle)."
-        )
-
-    _register_child(branch, parent)
-    print(f"Attached {branch} to {parent}")
-
-
-def cmd_detach(args: argparse.Namespace) -> None:
-    branch = args.branch or current_branch()
-    parent = _get_tree_parent(branch)
-    if not parent:
-        raise TreeError(f"{branch} is not in the tree.", code=5)
-
-    # detach is the recovery path for hand-edited cyclic config; discover() prunes cycles and
-    # returns a usable graph, so the normal child lookup and subtree preview work here too.
-    graph = discover()
-    children = graph.children_of.get(branch, [])
-
-    print(f"Detaching {branch} from {parent}.")
-    if children:
-        print(f"{branch} has children — they will form a separate tree:")
-        print(format_tree(graph, root=branch))
-
-    if not _proceed(args, "Proceed?"):
-        return
-
-    # A tree's remote is anchored on its root, so `branch` needs one when it becomes a root of
-    # something. Only when it has children: `branch.<name>.remote` is git's own key, not a
-    # git-tree one, so writing it on a branch that is leaving the tree entirely would retarget
-    # plain `git push`. Read the old root before unsetting the config that leads to it.
-    if children:
-        _carry_remote_to_root(root_of(graph, branch), branch)
-    _unset_tree_config(branch)
-    print(f"Detached {branch} (was child of {parent})")
-
-    if children:
-        graph = discover()
-        other_roots = [r for r in roots(graph) if r != branch]
-        if other_roots:
-            print("\nRemaining tree(s):")
-            print("\n\n".join(format_tree(graph, root=r) for r in other_roots))
 
 
 def cmd_remove(args: argparse.Namespace) -> None:
@@ -1086,37 +956,6 @@ def cmd_push(args: argparse.Namespace) -> dict | None:
             if status.startswith("skipped")
         ]
     }
-
-
-def cmd_log(args: argparse.Namespace) -> None:
-    graph = discover()
-    try:
-        branch = current_branch()
-    except TreeError:
-        print("Not on a tree-branch.")
-        raise SystemExit(0) from None
-    # A branch participates in the forest if it has a parent (a tracked child) or has
-    # children (a root). Anything else is a plain git branch git-tree doesn't track.
-    if branch not in graph.parent_of and branch not in graph.children_of:
-        print("Not on a tree-branch.")
-        raise SystemExit(0)
-
-    root = root_of(graph, branch)
-    descendants = graph.downstream_from(root)
-    all_refs = [root] + descendants
-
-    cmd = ["git", "log", "--graph", "--oneline", "--decorate"]
-    if _use_color():
-        cmd.append("--color=always")
-    cmd += all_refs
-
-    boundary = git("merge-base", "--octopus", *all_refs, check=False)
-    if boundary and git_ok("rev-parse", "--verify", f"{boundary}^"):
-        cmd.append(f"^{boundary}^")
-
-    cmd += args.extra
-    result = subprocess.run(cmd)
-    raise SystemExit(result.returncode)
 
 
 # ---------------------------------------------------------------------------
