@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from git_tree.cli import _stash_push_if_created, cmd_propagate
+from git_tree._git import _stash_push_if_created
+from git_tree.cli import cmd_propagate
 
 from .conftest import RepoHelper, cli_args
 

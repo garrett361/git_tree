@@ -4,7 +4,8 @@ import json
 
 import pytest
 
-from git_tree.cli import _has_active_rebase, main
+from git_tree._git import _has_active_rebase
+from git_tree.cli import main
 
 from .conftest import RepoHelper
 

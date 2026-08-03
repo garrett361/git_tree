@@ -8,11 +8,13 @@ from pathlib import Path
 import pytest
 
 from git_tree._errors import TreeError
-from git_tree.cli import (
+from git_tree._git import (
     _check_submodule_health,
     _force_remove_worktree,
     _has_active_rebase,
     _submodule_paths,
+)
+from git_tree.cli import (
     cmd_branch,
     cmd_propagate,
     cmd_rebase,
@@ -521,16 +523,16 @@ class TestForceRemoveWorktree:
         # Patch git_echo_ok to fake stage-1 failure, and git_echo/git to fake prune
         # not cleaning up. Easiest: make rmtree not actually remove the .git/worktrees entry.
         # Instead, monkeypatch shutil.rmtree to be a no-op and git worktree remove to fail.
-        import git_tree.cli as cli_mod
+        import git_tree._git as git_mod
 
-        original_git_echo_ok = cli_mod.git_echo_ok
+        original_git_echo_ok = git_mod.git_echo_ok
 
         def fake_git_echo_ok(*args, **kwargs):
             if args and args[0] == "worktree" and len(args) > 1 and args[1] == "remove":
                 return False
             return original_git_echo_ok(*args, **kwargs)
 
-        monkeypatch.setattr(cli_mod, "git_echo_ok", fake_git_echo_ok)
+        monkeypatch.setattr(git_mod, "git_echo_ok", fake_git_echo_ok)
         monkeypatch.setattr(shutil, "rmtree", lambda p: None)  # Don't actually delete
 
         with pytest.raises(TreeError):

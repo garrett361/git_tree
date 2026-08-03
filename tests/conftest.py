@@ -132,7 +132,7 @@ class RepoHelper:
         survives with a correct `onto`. Interactive `break`/`edit` stops would be the other way
         to reach this state, but they need a sequence editor and set `amend`/non-`pick` markers.
         """
-        from git_tree.cli import _active_rebase_onto, _has_active_rebase
+        from git_tree._git import _active_rebase_onto, _has_active_rebase
 
         self.git("-c", "core.editor=true", "rebase", onto, cwd=worktree, check=False)
         self.git("checkout", "--ours", "--", filename, cwd=worktree)

@@ -3,8 +3,8 @@ from __future__ import annotations
 import pytest
 
 from git_tree._errors import TreeError
+from git_tree._git import _has_active_rebase
 from git_tree.cli import (
-    _has_active_rebase,
     _root_remote,
     cmd_propagate,
     cmd_push,

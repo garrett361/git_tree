@@ -8,7 +8,8 @@ from pathlib import Path
 import pytest
 
 from git_tree._errors import TreeError
-from git_tree.cli import _has_active_rebase, cmd_propagate, discover
+from git_tree._git import _has_active_rebase
+from git_tree.cli import cmd_propagate, discover
 
 from .conftest import RepoHelper, cli_args
 

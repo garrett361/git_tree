@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+from git_tree._git import _worktree_status
 from git_tree.cli import (
     BranchInfo,
     _git_status_summary,
-    _worktree_status,
     cmd_tree,
     discover,
     format_tree,
