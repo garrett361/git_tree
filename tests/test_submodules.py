@@ -513,9 +513,7 @@ class TestForceRemoveWorktree:
         repo.branch("child", parent="main")
         wt = repo.worktree("child", str(tmp_path / "wt-child"))
 
-        # Patch git_echo_ok to fake stage-1 failure, and git_echo/git to fake prune
-        # not cleaning up. Easiest: make rmtree not actually remove the .git/worktrees entry.
-        # Instead, monkeypatch shutil.rmtree to be a no-op and git worktree remove to fail.
+        # Fail stage 1 and neuter stage 2, so the registration survives to the verify stage.
         import git_tree._git as git_mod
 
         original_git_echo_ok = git_mod.git_echo_ok

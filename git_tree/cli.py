@@ -34,11 +34,6 @@ def _version() -> str:
         return "0+unknown"
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
 def cmd_completions(args: argparse.Namespace) -> None:
     print(_render_completions(_build_parser(), args.shell))
 
@@ -53,11 +48,6 @@ def cmd_manpage(args: argparse.Namespace, parser: argparse.ArgumentParser) -> No
     dest = man_dir / "git-tree.1"
     dest.write_text(roff)
     print(f"Installed man page to {dest}")
-
-
-# ---------------------------------------------------------------------------
-# CLI entry point
-# ---------------------------------------------------------------------------
 
 
 _EPILOG = """\

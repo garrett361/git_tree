@@ -50,11 +50,6 @@ def _proceed(args: argparse.Namespace, message: str) -> bool:
     return confirm(message)
 
 
-# ---------------------------------------------------------------------------
-# fzf helpers
-# ---------------------------------------------------------------------------
-
-
 def fzf_select(items: list[str], *, prompt: str = "> ", header: str | None = None) -> list[str]:
     """Single-select via fzf; returns the chosen item as a 0-or-1 element list (empty on
     cancel or when fzf is unavailable). List-valued so callers have one shape to handle."""
