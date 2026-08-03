@@ -5,7 +5,8 @@ import os
 
 import pytest
 
-from git_tree.cli import TreeError, _has_active_rebase, cmd_remove, discover, main
+from git_tree._errors import TreeError
+from git_tree.cli import _has_active_rebase, cmd_remove, discover, main
 
 from .conftest import FZF_SELECT, RepoHelper, cli_args, stopped_rebase
 

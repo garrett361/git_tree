@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from git_tree.cli import TreeError, _root_remote, cmd_split, discover
+from git_tree._errors import TreeError
+from git_tree.cli import _root_remote, cmd_split, discover
 
 from .conftest import RepoHelper, cli_args
 

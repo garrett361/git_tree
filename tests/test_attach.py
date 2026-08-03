@@ -4,7 +4,8 @@ import subprocess
 
 import pytest
 
-from git_tree.cli import TreeError, cmd_attach, cmd_detach, discover, roots
+from git_tree._errors import TreeError
+from git_tree.cli import cmd_attach, cmd_detach, discover, roots
 
 from .conftest import RepoHelper, _git, cli_args
 

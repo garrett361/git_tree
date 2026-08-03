@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from git_tree.cli import TreeError, current_branch, discover, root_of, roots
+from git_tree._errors import TreeError
+from git_tree.cli import current_branch, discover, root_of, roots
 
 from .conftest import RepoHelper
 

@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from git_tree._errors import TreeError
 from git_tree.cli import (
-    TreeError,
     _check_submodule_health,
     _force_remove_worktree,
     _has_active_rebase,

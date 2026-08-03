@@ -345,7 +345,7 @@ of `["git","tree","propagate",<branch>]`, and re-running that argv finishes the 
 
 ## Current state
 
-**Steps 0-1 done** (test-only seam; `_render.py`). Next: step 2, `_errors.py`. This section is updated with
+**Steps 0-2 done** (test-only seam; `_render.py`; `_errors.py`). Next: step 3, `_prompt.py`. This section is updated with
 every step's commit, so a migration interrupted between sessions can be resumed from it.
 
 Baseline re-verified at commit `d727b82`, unchanged since `594e3cf`: 144 top-level names in

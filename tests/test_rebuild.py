@@ -4,7 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from git_tree.cli import TreeError, _has_active_rebase, cmd_rebuild, discover
+from git_tree._errors import TreeError
+from git_tree.cli import _has_active_rebase, cmd_rebuild, discover
 
 from .conftest import RepoHelper, add_submodule, allow_file_protocol, cli_args, stopped_rebase
 
