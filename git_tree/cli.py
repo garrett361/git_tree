@@ -15,9 +15,12 @@ from git_tree._cmd_attach import cmd_attach
 from git_tree._cmd_branch import cmd_branch
 from git_tree._cmd_detach import cmd_detach
 from git_tree._cmd_log import cmd_log
+from git_tree._cmd_push import cmd_push
+from git_tree._cmd_rebuild import cmd_rebuild
+from git_tree._cmd_remove import cmd_remove
 from git_tree._cmd_skills import cmd_skills
 from git_tree._cmd_tree import cmd_tree
-from git_tree._display import _subtree_lines, format_tree
+from git_tree._display import _subtree_lines
 from git_tree._engine import (
     _advance_branch,
     _auto_rerere,
@@ -29,39 +32,31 @@ from git_tree._errors import ConflictError, ErrorKind, TreeError
 from git_tree._git import (
     _active_rebase_branch,
     _carry_remote_to_root,
-    _force_remove_worktree,
     _get_tree_parent,
     _has_active_rebase,
-    _has_active_rebase_safe,
-    _init_submodules,
     _is_git_tree_rebase,
     _pending_sequencer_op,
     _register_child,
     _set_fork_commit,
-    _unset_tree_config,
     _worktree_status,
     _would_cycle,
     all_branch_names,
     current_branch,
     git,
-    git_echo,
     git_echo_ok,
     git_lines,
     git_ok,
 )
 from git_tree._graph import (
     _get_fork_commit,
-    _root_remote,
     discover,
     root_of,
 )
 from git_tree._guards import (
     _mid_rebase_branches,
-    _remove_blocking_dirt,
     _require_clean_state,
     _require_healthy_submodules,
     _require_ready,
-    _require_worktrees,
 )
 from git_tree._prompt import (
     _proceed,
@@ -82,325 +77,6 @@ def _version() -> str:
 # ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
-
-
-def cmd_remove(args: argparse.Namespace) -> None:
-    """Tear down a subtree's worktrees and unregister its branches from the tree.
-
-    Removes worktree directories and unsets tree config; it never deletes a branch ref, so no
-    committed work can be lost. Uncommitted work IS at risk (worktrees are force-removed), so by
-    default it refuses if any worktree or submodule is dirty; `--force` overrides that (and
-    destroys the uncommitted work, including inside submodules and git-ignored files).
-    """
-    graph = discover()
-    try:
-        cur: str | None = current_branch()
-    except TreeError:
-        cur = None
-
-    target = args.branch
-    if target is None:
-        _require_input(args, "branch to remove", "the branch argument")
-        # No branch given: pick from removable tree-branches that have a worktree. The
-        # picker doesn't pre-filter dirty ones — the clean gate below still catches them.
-        candidates = sorted(
-            b
-            for b in graph.parent_of
-            if b != cur and (info := graph.branches.get(b)) and info.worktree
-        )
-        if not candidates:
-            raise TreeError("No tree-branch worktrees available to remove.")
-        target = _select_one(
-            candidates,
-            prompt="Remove worktree> ",
-            header="Select a tree-branch to remove (its worktree + subtree)",
-        )
-
-    # Only non-root tree-branches: this never touches a tree's trunk / main worktree.
-    if target not in graph.parent_of:
-        raise TreeError(
-            f"{target} is not a removable tree-branch — it has no tree-parent "
-            f"(git tree remove won't touch a tree root).",
-            code=5,
-        )
-
-    subtree = [target] + graph.downstream_from(target)  # parents-first
-
-    if cur in subtree:
-        raise TreeError(
-            f"cannot remove {cur}: it's the branch you're on. "
-            f"Switch to a branch outside the subtree first."
-        )
-
-    force = args.force
-
-    # cwd guard: force-removal deletes the directory outright (bypassing git's "can't delete the
-    # tree you're standing in" protection), and a following `git worktree prune` from a deleted
-    # cwd errors. Refuse if the shell is inside any worktree being removed.
-    try:
-        cwd = Path.cwd().resolve()
-        inside = [
-            b
-            for b in subtree
-            if (info := graph.branches.get(b))
-            and info.worktree
-            and cwd.is_relative_to(info.worktree.resolve())
-        ]
-        if inside:
-            raise TreeError(
-                f"Your shell is inside a worktree being removed ({', '.join(inside)}). "
-                f"cd to a different directory first.",
-                code=4,
-                branches=inside,
-            )
-    except (OSError, ValueError):
-        pass  # cwd resolution failed; proceed
-
-    # A stopped rebase is usually dirty, so the gate below caught this by accident rather than on
-    # purpose. It stops at a clean point often enough to matter (an --exec failure, git-tree's own
-    # empty-patch stop), and then the worktree holds the only reference to every conflict already
-    # resolved in that rebase: the branch ref hasn't moved, so the work lives on the detached HEAD
-    # and in the worktree's own HEAD reflog, both of which go with the directory.
-    mid_rebase = [
-        b
-        for b in subtree
-        if (info := graph.branches.get(b))
-        and info.worktree
-        and _has_active_rebase_safe(info.worktree)
-    ]
-    if mid_rebase and not force:
-        raise TreeError(
-            "Refusing to remove: a rebase is in progress in:\n"
-            + "\n".join(f"  {b}  ({graph.branches[b].worktree})" for b in mid_rebase)
-            + "\n\nFinish it (`git tree propagate <branch>`) or `git rebase --abort` there, or "
-            "re-run with --force to discard it. Nothing was removed.",
-            code=4,
-            branches=mid_rebase,
-        )
-
-    # Safety gate (all-or-nothing): worktrees are force-removed, so uncommitted work (in the
-    # worktree OR any submodule at any depth) is at risk. Refuse unless --force. Branch refs are
-    # kept, so committed work is never at risk.
-    dirty = [
-        b
-        for b in subtree
-        if (info := graph.branches.get(b))
-        and info.worktree
-        and _remove_blocking_dirt(info.worktree)
-    ]
-    if dirty and not force:
-        lines = [
-            "Refusing to remove: these worktrees have uncommitted changes "
-            "(possibly inside a submodule):"
-        ]
-        lines += [f"  {b}  ({graph.branches[b].worktree})" for b in dirty]
-        lines.append(
-            "\nCommit, stash, or discard them, or re-run with --force to remove anyway. "
-            "Nothing was removed."
-        )
-        raise TreeError("\n".join(lines), code=4, branches=dirty)
-
-    print(f"Removing worktrees and unregistering {target} + its subtree (branch refs kept):")
-    print(format_tree(graph, root=target))
-    # Said on every path, not just --force: `git status` never reports ignored files, so they are
-    # deleted without ever having been counted as dirt. `.env` files and venvs live here.
-    print("\nThis deletes each worktree directory, git-ignored files included.")
-    if dirty:  # implies force
-        print("\nWarning: --force will destroy uncommitted changes (and any git-ignored files) in:")
-        for b in dirty:
-            print(f"  {b}  ({graph.branches[b].worktree})")
-    if mid_rebase:  # implies force
-        print("\nWarning: --force will discard the rebase in progress in:")
-        for b in mid_rebase:
-            print(f"  {b}  ({graph.branches[b].worktree})")
-    print()
-    if args.dry_run:
-        return
-    if not _proceed(args, "Remove these worktrees and detach the branches?"):
-        return
-
-    # Re-scan once, all-or-nothing, before deleting anything: closes the check->delete window
-    # that plain `git worktree remove` used to guard (a worktree could go dirty during the
-    # prompt). --force already opted out of the gate.
-    if not force:
-        late = [
-            b
-            for b in subtree
-            if (info := graph.branches.get(b))
-            and info.worktree
-            and (_remove_blocking_dirt(info.worktree) or _has_active_rebase_safe(info.worktree))
-        ]
-        if late:
-            raise TreeError(
-                "These worktrees became dirty after confirmation; nothing was removed:\n"
-                + "\n".join(f"  {b}  ({graph.branches[b].worktree})" for b in late),
-                code=4,
-                branches=late,
-            )
-
-    # Children-first. `_force_remove_worktree` handles submodule worktrees git refuses to remove
-    # and raises TreeError on genuine failure (so removal stops rather than report false success).
-    removed_worktrees = 0
-    for b in reversed(subtree):
-        info = graph.branches.get(b)
-        if info and info.worktree:
-            _force_remove_worktree(info.worktree, b)
-            removed_worktrees += 1
-        _unset_tree_config(b)
-
-    print(
-        f"\nDetached {len(subtree)} branch(es) from the tree; "
-        f"removed {removed_worktrees} worktree(s). Branch refs kept."
-    )
-
-
-def _prunable_worktree_path(branch: str) -> Path | None:
-    """Path of a stale (prunable) worktree registration for `branch`, if any.
-
-    Its directory was deleted (rm -rf'd) without `git worktree prune`, so `discover()`
-    drops it and the branch looks worktree-less. `cmd_rebuild` uses this to point the user
-    at recovery rather than a bare "nothing to rebuild"."""
-    porcelain = git("worktree", "list", "--porcelain")
-    for entry in porcelain.split("\n\n"):
-        lines = entry.splitlines()
-        if not any(line == f"branch refs/heads/{branch}" for line in lines):
-            continue
-        if not any(line.startswith("prunable") for line in lines):
-            continue
-        path = next((line.split(" ", 1)[1] for line in lines if line.startswith("worktree ")), None)
-        if path:
-            return Path(path)
-    return None
-
-
-def cmd_rebuild(args: argparse.Namespace) -> None:
-    """Rebuild a corrupted worktree from the branch tip, preserving branch ref and tree config."""
-    graph = discover()
-
-    target = args.branch
-    if target is None:
-        _require_input(args, "branch to rebuild", "the branch argument")
-        candidates = sorted(
-            b for b in graph.parent_of if (info := graph.branches.get(b)) and info.worktree
-        )
-        if not candidates:
-            raise TreeError("No tree-branch worktrees available to rebuild.")
-        target = _select_one(
-            candidates,
-            prompt="Rebuild worktree> ",
-            header="Select a tree-branch whose worktree to rebuild",
-        )
-
-    if target not in graph.parent_of:
-        raise TreeError(
-            f"git tree rebuild only acts on tree-branches; {target} has no tree-parent "
-            f"(rebuild won't touch a tree root).",
-            code=5,
-        )
-
-    info = graph.branches.get(target)
-    if not info or not info.worktree:
-        stale = _prunable_worktree_path(target)
-        if stale is not None:
-            raise TreeError(
-                f"{target}'s worktree at {stale} is gone, but git still has a stale "
-                f"registration for it. `git tree rebuild` recreates a corrupted worktree in "
-                f"place; it can't resurrect a deleted directory.\n"
-                f"Recover with:\n"
-                f"  git worktree prune\n"
-                f"  git worktree add {stale} {target}",
-                code=4,
-            )
-        raise TreeError(f"{target} has no worktree registered. Nothing to rebuild.", code=4)
-
-    wt_path = info.worktree
-
-    # Refuse if cwd is inside the target worktree
-    try:
-        cwd = Path.cwd().resolve()
-        wt = wt_path.resolve()
-        if cwd.is_relative_to(wt):
-            raise TreeError(
-                f"Cannot rebuild {target}: your shell is inside its worktree ({wt_path}).\n"
-                f"cd to a different directory first.",
-                code=4,
-            )
-    except (OSError, ValueError):
-        pass  # cwd resolution failed; proceed anyway
-
-    force = args.force
-    if not force and _has_active_rebase_safe(wt_path):
-        raise TreeError(
-            f"{target} has a rebase in progress in {wt_path}. Rebuilding discards it, along with "
-            f"every conflict already resolved in it (the branch ref has not moved, so that work "
-            f"exists only in this worktree).\nFinish it (`git tree propagate {target}`) or "
-            f"`git rebase --abort` there, or re-run with --force.",
-            code=4,
-        )
-
-    # Same gate `remove` uses, not a bare `git status`: that misses submodule dirt whenever
-    # .gitmodules carries `ignore = all`, and misses a populated-but-uninitialized submodule
-    # directory entirely. Both are real content, and rebuild deletes the worktree.
-    #
-    # Read the worktree's own state first, with submodules excluded so a corrupted one cannot
-    # make this fail. It answers two questions. If it cannot run at all, nothing here is
-    # inspectable, so refuse rather than delete blind. If the fuller gate below then fails, that
-    # failure is the submodule corruption rebuild exists to repair, so fall back to this answer
-    # instead of refusing: demanding --force there would demand it for rebuild's whole purpose.
-    own_dirt: bool | None = None
-    try:
-        own_dirt = _worktree_status(
-            wt_path, ignore_submodules="all", untracked_files="normal"
-        ).dirty
-    except subprocess.CalledProcessError as err:
-        if not force:
-            raise TreeError(
-                f"Could not read {wt_path} at all (git status failed there), so git-tree cannot "
-                f"tell whether it holds uncommitted work.\nRescue anything you need from that "
-                f"directory, then re-run with --force.",
-                code=4,
-            ) from err
-    try:
-        blocked = _remove_blocking_dirt(wt_path)
-    except subprocess.CalledProcessError:
-        print(
-            f"Warning: could not inspect submodules under {wt_path}; "
-            f"checking the worktree itself only.",
-            file=sys.stderr,
-        )
-        blocked = bool(own_dirt)
-    if blocked and not force:
-        raise TreeError(
-            f"{target} has uncommitted changes in {wt_path} (possibly inside a submodule).\n"
-            f"Pass --force to rebuild anyway (uncommitted work will be lost).",
-            code=4,
-        )
-
-    # The branch's committed .gitmodules is the reliable signal: the (possibly corrupted)
-    # worktree may be missing files, but the recreated one checks out the branch tip.
-    has_submodules = git_ok("cat-file", "-e", f"{target}:.gitmodules")
-    steps = ["Remove corrupted worktree", "Recreate worktree"]
-    if has_submodules:
-        steps.append("Initialize submodules")
-    print(f"Rebuilding {target} at {wt_path}:")
-    for i, step in enumerate(steps, 1):
-        print(f"  {i}. {step}")
-    print()
-    if not _proceed(args, "Proceed?"):
-        return
-
-    _force_remove_worktree(wt_path, target)
-    if not git_echo_ok("worktree", "add", str(wt_path), target):
-        raise TreeError(f"Failed to recreate worktree at {wt_path}.")
-    # Rebuild exists to make submodule state healthy, so a failed init is a failed rebuild; don't
-    # claim "is healthy" over it.
-    if not _init_submodules(wt_path):
-        raise TreeError(
-            f"Recreated {target}'s worktree at {wt_path}, but submodule init failed (see output "
-            f"above). Fix the submodule issue, then re-run `git tree rebuild {target}`.",
-            code=4,
-        )
-    print(f"\nRebuilt {target}: worktree at {wt_path} is healthy.")
 
 
 def cmd_propagate(args: argparse.Namespace) -> None:
@@ -825,137 +501,6 @@ def cmd_split(args: argparse.Namespace) -> None:
     print("\nSplit complete:")
     print(f"  {parent_name} ({len(split_commits)} commits) → new parent branch")
     print(f"  {branch} ({len(remaining)} commits) → now child of {parent_name}")
-
-
-def cmd_push(args: argparse.Namespace) -> dict | None:
-    branch = current_branch()
-    graph = discover()
-
-    # Hard-error (unlike cmd_log's benign exit) so a stray `git tree push` on a plain
-    # branch like `main` can never force-push it to the branch's own `branch.remote`.
-    if branch not in graph.parent_of and branch not in graph.children_of:
-        raise TreeError("Not on a tree-branch.", code=5)
-
-    descendants = graph.downstream_from(branch)
-    push_set = [branch] + descendants
-    _require_worktrees([b for b in push_set if b in graph.branches], graph)
-
-    # One remote per tree, defined on the root; every branch pushes there.
-    root, root_remote = _root_remote(graph, branch)
-    if not root_remote:
-        raise TreeError(
-            f"root tree-branch '{root}' has no remote configured "
-            f"(set it with `git config branch.{root}.remote <remote>`)"
-        )
-
-    # Note: intentionally do NOT fetch here. `--force-with-lease` (no explicit
-    # expected ref) compares the remote against the remote-tracking ref; fetching
-    # first would advance that ref to a teammate's commit and let the force-push
-    # silently clobber it. The un-fetched ref reflects our last known state and is
-    # exactly what makes the lease reject a clobber.
-
-    stale: list[str] = []
-    ahead: dict[str, int] = {}
-    new_roots: set[str] = set()
-
-    for b in push_set:
-        parent = graph.parent_of.get(b)
-        if parent and b != branch:
-            merge_base = git("merge-base", parent, b)
-            parent_tip = git("rev-parse", parent)
-            if merge_base != parent_tip:
-                stale.append(b)
-                continue
-
-        remote_ref = f"{root_remote}/{b}"
-        if git_ok("rev-parse", "--verify", remote_ref):
-            ahead[b] = len(git_lines("rev-list", f"{remote_ref}..{b}"))
-        elif parent:
-            base = git("merge-base", parent, b)
-            ahead[b] = len(git_lines("rev-list", f"{base}..{b}"))
-        else:
-            # Never-pushed root: no remote ref and no parent to count against, so an
-            # "ahead" number is meaningless (merge-base(b, b) is b -> a bogus 0). It's new.
-            new_roots.add(b)
-
-    pushable = [b for b in push_set if b not in stale]
-
-    # A branch whose ancestor in this run is stale can't be pushed — its base
-    # wouldn't be on the remote. Propagate that through descendants (push_set is
-    # topological, parents before children) for an accurate preview.
-    blocked = set(stale)
-    for b in pushable:
-        if graph.parent_of.get(b) in blocked:
-            blocked.add(b)
-
-    print(f"Pushing to {root_remote} (--force-with-lease):")
-    for b in push_set:
-        if b in stale:
-            print(f"  {b}  (stale - run propagate first)")
-        elif b in blocked:
-            print(f"  {b}  (skipped - ancestor not pushed)")
-        elif b in new_roots:
-            print(f"  {b}  (new)")
-        else:
-            print(f"  {b}  [{ahead.get(b, 0)} ahead]")
-    print()
-
-    if args.dry_run or not _proceed(args, "Proceed?"):
-        return
-
-    results: list[tuple[str, str]] = []
-    failed: list[str] = []
-    lease_rejected = False
-    for b in pushable:
-        # Skip if an ancestor in this run is stale or its push failed. Re-add b so
-        # the block cascades to its own descendants later in the loop.
-        if graph.parent_of.get(b) in blocked:
-            results.append((b, "skipped (ancestor not pushed)"))
-            blocked.add(b)
-            continue
-
-        res = git_echo("push", "--force-with-lease", "-u", root_remote, b)
-        if res.returncode == 0:
-            results.append((b, "ok"))
-        else:
-            blocked.add(b)
-            failed.append(b)
-            if "stale info" in (res.stderr or ""):
-                lease_rejected = True  # the lease caught a remote that moved under us
-            results.append((b, "FAILED"))
-
-    print()
-    print("Results:")
-    for name, status in results:
-        print(f"  {name}: {status}")
-
-    if failed:
-        # A push that fails must not exit 0 (latent bug). A lease rejection means the remote
-        # advanced — fetch + propagate, then retry — which is distinct from a transport/hook
-        # failure, so an agent gets a specific `kind`.
-        hint = (
-            " (lease rejected: the remote moved — fetch, `git tree propagate`, then retry)"
-            if lease_rejected
-            else ""
-        )
-        raise TreeError(
-            f"push failed for: {', '.join(failed)}{hint}",
-            code=1,
-            kind=ErrorKind.LEASE_REJECTED if lease_rejected else None,
-            branches=failed,
-        )
-
-    # Surface what was NOT pushed. This is the one place a bare {ok:true} under-informs an
-    # agent: stale/blocked branches are silently left behind and the skip classification isn't
-    # cleanly re-derivable from a forest snapshot. (Human mode ignores the return.)
-    return {
-        "skipped": [{"branch": b, "reason": "stale"} for b in stale]
-        + [
-            {"branch": b, "reason": "ancestor_not_pushed"}
-            for b, status in results
-            if status.startswith("skipped")
-        ]
-    }
 
 
 # ---------------------------------------------------------------------------
