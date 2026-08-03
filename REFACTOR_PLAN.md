@@ -345,7 +345,7 @@ of `["git","tree","propagate",<branch>]`, and re-running that argv finishes the 
 
 ## Current state
 
-**Steps 0-6 done** (test-only seam, then `_render`, `_errors`, `_prompt`, `_git`, `_graph`, `_display`, `_guards`, `_engine`). Next: step 9, `_cmd_skills.py`. This section is updated with
+**Steps 0-6 done** (test-only seam, then `_render`, `_errors`, `_prompt`, `_git`, `_graph`, `_display`, `_guards`, `_engine`, `_cmd_skills`). Next: steps 10-20, the eleven command modules. This section is updated with
 every step's commit, so a migration interrupted between sessions can be resumed from it.
 
 Baseline re-verified at commit `d727b82`, unchanged since `594e3cf`: 144 top-level names in

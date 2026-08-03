@@ -8,7 +8,8 @@ from pathlib import Path
 
 import pytest
 
-from git_tree.cli import _build_parser, _bundled_skills, main
+from git_tree._cmd_skills import _bundled_skills
+from git_tree.cli import _build_parser, main
 
 SKILL_NAMES = {"git-tree-land", "git-tree-doctor", "git-tree-propagate"}
 
