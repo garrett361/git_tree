@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-FZF_SELECT = "git_tree.cli.fzf_select"
+FZF_SELECT = "git_tree._prompt.fzf_select"
 """Monkeypatch target for the fzf picker, named once so tests don't each hard-code the module
 a production function happens to live in."""
 
