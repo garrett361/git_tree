@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from git_tree.cli import discover, main, roots
+from git_tree._graph import discover, roots
+from git_tree.cli import main
 
 from .conftest import RepoHelper
 

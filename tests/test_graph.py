@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from git_tree.cli import discover
+from git_tree._graph import discover
 
 from .conftest import RepoHelper
 

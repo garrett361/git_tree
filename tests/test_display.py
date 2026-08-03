@@ -1,14 +1,8 @@
 from __future__ import annotations
 
 from git_tree._git import _worktree_status
-from git_tree.cli import (
-    BranchInfo,
-    _git_status_summary,
-    cmd_tree,
-    discover,
-    format_tree,
-    main,
-)
+from git_tree._graph import BranchInfo, discover
+from git_tree.cli import _git_status_summary, cmd_tree, format_tree, main
 
 from .conftest import RepoHelper, cli_args
 

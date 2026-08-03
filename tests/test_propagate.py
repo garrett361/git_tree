@@ -9,7 +9,8 @@ import pytest
 
 from git_tree._errors import TreeError
 from git_tree._git import _has_active_rebase
-from git_tree.cli import cmd_propagate, discover
+from git_tree._graph import discover
+from git_tree.cli import cmd_propagate
 
 from .conftest import RepoHelper, cli_args
 

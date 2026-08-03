@@ -14,15 +14,8 @@ from __future__ import annotations
 
 import pytest
 
-from git_tree.cli import (
-    BranchInfo,
-    _get_fork_commit,
-    cmd_attach,
-    cmd_branch,
-    cmd_propagate,
-    cmd_split,
-    discover,
-)
+from git_tree._graph import BranchInfo, _get_fork_commit, discover
+from git_tree.cli import cmd_attach, cmd_branch, cmd_propagate, cmd_split
 
 from .conftest import RepoHelper, cli_args
 

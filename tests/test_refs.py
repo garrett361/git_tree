@@ -6,7 +6,7 @@ import pytest
 
 from git_tree._errors import TreeError
 from git_tree._git import current_branch
-from git_tree.cli import discover, root_of, roots
+from git_tree._graph import discover, root_of, roots
 
 from .conftest import RepoHelper
 

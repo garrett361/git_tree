@@ -14,15 +14,8 @@ from git_tree._git import (
     _has_active_rebase,
     _submodule_paths,
 )
-from git_tree.cli import (
-    cmd_branch,
-    cmd_propagate,
-    cmd_rebase,
-    cmd_rebuild,
-    cmd_remove,
-    discover,
-    main,
-)
+from git_tree._graph import discover
+from git_tree.cli import cmd_branch, cmd_propagate, cmd_rebase, cmd_rebuild, cmd_remove, main
 
 from .conftest import (
     RepoHelper,
