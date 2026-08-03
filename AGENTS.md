@@ -46,16 +46,28 @@ Fast inner loop: test files map 1:1 to commands (`test_rebase.py`, `test_push.py
 
 ## Adding a subcommand
 
-A command touches two sites:
+A command touches three sites:
 
-1. The `cmd_<name>(args)` handler.
-2. `sub.add_parser(...)` in `_build_parser()`, with `.set_defaults(func=cmd_<name>)`. The parser is the single source of truth: that one block wires dispatch (`main()` calls `args.func`), `-h`, the man page (`_render_manpage`), and both shell completions (`_render_completions`). If a value arg should complete branches or paths, tag it with `_set_completer(parser.add_argument(...), "git_heads"/"directories")`.
+1. The `cmd_<name>(args)` handler, in its own `git_tree/_cmd_<name>.py` module.
+2. The import of that handler in `cli.py`, which is what lets the parser name it. This is a real
+   binding, not a re-export: `set_defaults` consumes it, so ruff will not prune it, and tests may
+   keep importing `cmd_<name>` from `git_tree.cli`.
+3. `sub.add_parser(...)` in `_build_parser()`, with `.set_defaults(func=cmd_<name>)`. The parser is the single source of truth: that one block wires dispatch (`main()` calls `args.func`), `-h`, the man page (`_render_manpage`), and both shell completions (`_render_completions`). If a value arg should complete branches or paths, tag it with `_set_completer(parser.add_argument(...), "git_heads"/"directories")`.
 
 Commands that emit non-envelope output (`manpage`, `completions`) or have no JSON form (`log`) are special-cased in `main()` before the `args.func` dispatch; `manpage`/`completions` therefore set no `func` (and `cmd_manpage` takes the parser, so it could not be dispatched generically anyway). Completions are generated from the parser, so they cannot drift; `tests/test_agentic.py::TestCompletionGeneration` asserts the generated scripts complete the right tokens per subcommand and parse under the real shells.
 
 ## Architecture
 
-Single module: `git_tree/cli.py`. All commands, git helpers, graph discovery, and tree display in one file. Entry point: `git_tree.cli:main` (registered as `git-tree` console script).
+**Layout**: 21 flat modules under `git_tree/`, one per layer plus one per command, in an acyclic import graph. Entry point: `git_tree.cli:main` (registered as `git-tree` console script). `cli.py` holds only the CLI surface: the parser, `main`, the JSON envelope, and the two commands that cannot dispatch generically. A module may import only from a strictly lower rank:
+
+- **L0** `_errors` (error types, the `ErrorKind` tag vocabulary), `_render` (completion scripts + man page)
+- **L1** `_git` (subprocess wrappers, config accessors, worktree/submodule/rebase state readers), `_prompt` (y/N confirm, fzf picker)
+- **L2** `_graph` (`BranchSnapshot`, `BranchInfo`, `Graph`, `discover`, root resolution)
+- **L3** `_display` (tree rendering, `_tree_json`), `_guards` (pre-flight gates), `_engine` (the cascade), `_cmd_skills`
+- **L4** the eleven `_cmd_<name>` modules, one per command, which never import each other
+- **L5** `cli`
+
+The only same-rank edge is `_engine -> _guards`, because `_skip_empty_commits` calls `_refuse_unfinished_replay`. Four placements are load-bearing and look wrong out of context, so do not "tidy" them: `Color`/`_use_color`/`_color` live in `_git` because `git_echo` dims its own output; `WorktreeStatus`/`_worktree_status` live there too, apart from the other dataclasses, because `BranchInfo.is_dirty` calls the reader at runtime; `_get_fork_commit` sits in `_graph` while `_set_fork_commit` stays in `_git`, since the getter takes a `BranchInfo` and the setter is called by `_register_child`; and `_tree_json` is in `_display`, not `_graph`, because it calls `_pending_commit_count`/`_ahead_behind`. Each of the alternatives is a cycle. Helpers that two commands share (`_remove_blocking_dirt`, `_auto_rerere`) live in `_guards`/`_engine` for the same reason: otherwise one command module would import another.
 
 **Dependency storage** (git config, no external files/commit labels):
 - `branch.<name>.tree-parent-branch <parent>` — the parent branch (structural edge)
@@ -71,7 +83,7 @@ Single module: `git_tree/cli.py`. All commands, git helpers, graph discovery, an
 - `BranchInfo` dataclass: `name`, `worktree` (optional Path), `fork_commit`, `is_dirty`. A tree has one remote, defined on its **root** (`branch.<root>.remote`); push and status resolve it via `_root_remote`/`root_of` rather than per-branch.
 - `discover()`: reads worktree list + git config to build the graph
 
-**Submodule awareness** (helpers near `_require_clean_state`):
+**Submodule awareness** (readers in `_git.py`, the pre-flight gate in `_guards.py`):
 - `_submodule_paths(worktree)`: parses `.gitmodules` via `configparser`, returns paths that exist on disk. Raises `TreeError` when the file cannot be parsed (git accepts things `configparser` rejects, e.g. a repeated `[submodule "x"]`); callers deciding whether deleting is safe must treat that as "cannot prove clean" rather than "no submodules".
 - `_check_submodule_health(worktree, submodule_path)`: resolves `.git` file → gitdir target → checks HEAD exists. Never shells out (the submodule may be corrupted).
 - `_require_healthy_submodules(branches, graph)`: pre-flight gate in `propagate`/`rebase`. Must run BEFORE `_require_clean_state` (`git status` crashes on corrupted submodules).
