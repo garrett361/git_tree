@@ -17,6 +17,13 @@ This is a **migration only**. Move code, adjust imports, nothing else. No rename
 changes, no docstring rewrites, no dead-code removal, no behavior changes. The outcome is 21
 modules with an acyclic import graph and a `cli.py` holding only the CLI surface.
 
+One deliberate exception to "nothing else": `cli.py`'s 13 decorative section banners
+(`# ---` / `# Title` / `# ---`) do **not** travel with their code. A new module's name says what
+its banner said, and decorative headers are banned by the project's style rules, so new modules
+get none and a banner is deleted from `cli.py` once the last definition under it leaves. Every
+definition itself still moves byte-identically; the exception covers only the text between
+definitions.
+
 The structure stays **flat** (`git_tree/_git.py`, not `git_tree/core/git.py`). The `_cmd_` prefix
 already groups the command modules, a module's level is legible from its import block, and
 directories would not enforce the layering anyway. One concrete hazard also rules subpackages
@@ -180,6 +187,7 @@ Step 0 leaves the module path named in conftest (and the one bespoke stub); step
 | 9 | `_cmd_skills.py` | test_skills (`_bundled_skills`) |
 | 10-20 | `_cmd_tree`, `_cmd_branch`, `_cmd_attach`, `_cmd_detach`, `_cmd_remove`, `_cmd_rebuild`, `_cmd_propagate`, `_cmd_rebase`, `_cmd_split`, `_cmd_push`, `_cmd_log` | `cli.py` keeps a binding for every dispatched `cmd_*` (the parser passes them to `set_defaults`), so direct test imports of those need not move |
 | 21 | docs | AGENTS.md, three statements: rewrite the "Single module: `git_tree/cli.py`" Architecture paragraph; update "Adding a subcommand" (a command now touches three sites — handler in a `_cmd_*` module, parser block in `cli.py`, dispatch unchanged); and fix "Submodule awareness (helpers near `_require_clean_state`)", which becomes false |
+| 22 | `tests/test_repo_structure.py` | none (a new test; see "Import layering test" below) |
 
 Order constraints, verified by AST against each handler's real call set: run 8 after 7
 (`_engine` needs `_guards`), and steps 10-20 after 6, 7 and 8 (`_cmd_propagate`/`_cmd_rebase` need
@@ -310,6 +318,21 @@ sys.exit(1 if (dupes or base ^ set(found)) else 0)
 A "new" name mid-migration means someone added a symbol to `cli.py` while the split was in
 flight (see risk 8) — place it by its call sites and add it to the layout table before continuing.
 
+**Nor does the partition check catch a definition rewritten rather than moved.** It compares name
+sets, so a tidied docstring, a reflowed comment, or a "harmless" simplification inside a moved
+function passes every gate above: ruff, ty, the test suite, and the goldens are all satisfied by
+behavior-preserving edits. A second script closes that gap: for every top-level definition, extract
+its source segment (decorator line through `end_lineno`) from `cli.py` at the pre-refactor commit
+via `git show`, and assert byte-equality against the same definition wherever it now lives.
+Definition-scoped, so the dropped section banners above do not trip it. Extraction needs
+`min(d.lineno for d in node.decorator_list)` as the start line, not `node.lineno`, or the five
+decorated definitions (`WorktreeStatus`, `BranchSnapshot`, `BranchInfo`, `Graph`, `RebaseResult`)
+lose their decorator.
+
+A third script enforces the rank rule from "Import layering test" while the split is in flight,
+where the committed test cannot yet run. Both scripts live outside the repo alongside
+`check_partition.py`.
+
 At the end, on a scratch stacked repo: `git tree --json` emits exactly one JSON object on stdout
 with diagnostics on stderr; `git tree skills` lists the same three skills with the same destination
 paths and states; a deliberate conflict during `git tree propagate` still exits 3 with a `remedy`
@@ -317,14 +340,41 @@ of `["git","tree","propagate",<branch>]`, and re-running that argv finishes the 
 
 ## Current state
 
-Not started. Begin at step 0.
+Not started. Begin at step 0. This section is updated with every step's commit, so a migration
+interrupted between sessions can be resumed from it.
 
-Baseline at the time of writing (commit `594e3cf`): 144 top-level names in `cli.py`; full gate
-green at 292 passed, 5 xfailed.
+Baseline re-verified at commit `d727b82`, unchanged since `594e3cf`: 144 top-level names in
+`cli.py` (3493 lines); full gate green at 292 passed, 5 xfailed; all four goldens and the three
+partition/byte-identity/import scripts green.
 
-## Deliberately out of scope
+## Import layering test
 
-An import-layering test (parse each module's imports, assert they fall in that module's allowed
-set) would turn the DAG above into a checked invariant rather than a documented convention. It was
-considered and declined to keep this migration pure. Worth revisiting separately if a back-edge
-ever appears.
+An earlier revision of this plan declined an import-layering test to keep the migration pure. That
+was reversed: a documented convention that nothing checks is one careless import away from being
+false, and the DAG is the whole point of the split. It lands as step 22, after the migration, as
+`tests/test_repo_structure.py`.
+
+It cannot land earlier. Mid-migration, every not-yet-extracted module still imports from `cli.py`,
+so the test would fail against work in progress.
+
+The invariant is expressed as **ranks**, not an explicit edge list: a module may import only from
+strictly lower ranks.
+
+| Rank | Modules |
+|---|---|
+| 0 | `_errors`, `_render` |
+| 1 | `_git`, `_prompt` |
+| 2 | `_graph` |
+| 3 | `_display`, `_guards`, `_engine`, `_cmd_skills` |
+| 4 | the eleven `_cmd_*` command modules |
+| 5 | `cli` |
+
+One declared same-rank exception: `_engine` may import `_guards`, because `_skip_empty_commits`
+calls `_refuse_unfinished_replay`. Two further assertions are invariants rather than rankings:
+nothing may import `cli`, and no `_cmd_*` may import another `_cmd_*` (which the same-rank rule
+already gives, but which is worth asserting by name since it is placement rule 0).
+
+Ranks beat an edge list here because they stay correct as the real import sets settle (whether
+`_graph` ends up needing `_errors`, say) while still forbidding every back-edge. The test walks
+the real module set rather than a hard-coded file list, so a module added later is covered by
+default and a module at no declared rank fails loudly.
