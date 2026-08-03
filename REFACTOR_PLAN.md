@@ -345,17 +345,17 @@ of `["git","tree","propagate",<branch>]`, and re-running that argv finishes the 
 
 ## Current state
 
-**Steps 0-6 done** (test-only seam, then `_render`, `_errors`, `_prompt`, `_git`, `_graph`, `_display`, `_guards`, `_engine`, `_cmd_skills`), plus the five leaf command modules. Next: the destructive commands
-(`_cmd_remove`, `_cmd_rebuild`, `_cmd_push`), then the cascade commands.
+**The split is complete.** All 21 modules exist, `cli.py` holds only the CLI surface (10 top-level
+names: `_version`, `_EPILOG`, `_KIND_BY_CODE`, `_envelope`, `_error_envelope`, `_render_error`,
+`cmd_completions`, `cmd_manpage`, `_build_parser`, `main`), and the import DAG has zero violations.
+Remaining: step 21 (AGENTS.md) and step 22 (`tests/test_repo_structure.py`).
 
-Steps 10-20 land as three batch commits rather than eleven: one subagent run produces all of a
+Steps 10-20 landed as three batch commits rather than eleven: one subagent run produces all of a
 batch's modules in a single working-tree state, and splitting that into per-module commits would
-mean hand-splitting `cli.py`'s hunks and stashing to gate each intermediate state. This section is updated with
-every step's commit, so a migration interrupted between sessions can be resumed from it.
+mean hand-splitting `cli.py`'s hunks and stashing to gate each intermediate state.
 
-Baseline re-verified at commit `d727b82`, unchanged since `594e3cf`: 144 top-level names in
-`cli.py` (3493 lines); full gate green at 292 passed, 5 xfailed; all four goldens and the three
-partition/byte-identity/import scripts green.
+Baseline held throughout: 144 top-level names, every definition byte-identical to `d727b82`, 292
+passed / 5 xfailed at every step, and all four goldens unchanged.
 
 ## Import layering test
 
