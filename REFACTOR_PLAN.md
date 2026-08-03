@@ -1,6 +1,6 @@
 # Refactor plan: split `git_tree/cli.py` into modules
 
-Status: **not started** (see "Current state" at the end). This document is the agreed plan,
+Status: **in progress** (see "Current state" at the end). This document is the agreed plan,
 reviewed by four independent reviewer passes and revised twice. Read it in full before starting.
 
 ## Goal
@@ -17,7 +17,12 @@ This is a **migration only**. Move code, adjust imports, nothing else. No rename
 changes, no docstring rewrites, no dead-code removal, no behavior changes. The outcome is 21
 modules with an acyclic import graph and a `cli.py` holding only the CLI surface.
 
-One deliberate exception to "nothing else": `cli.py`'s 13 decorative section banners
+Two deliberate exceptions to "nothing else". First, each new module opens with a one-line
+docstring saying what it holds, which is what makes a flat 21-module layout legible. This is safe
+because only `cli.py`'s docstring is load-bearing (`description=__doc__` in `_build_parser`, risk
+2), and that one stays byte-identical.
+
+Second, `cli.py`'s 13 decorative section banners
 (`# ---` / `# Title` / `# ---`) do **not** travel with their code. A new module's name says what
 its banner said, and decorative headers are banned by the project's style rules, so new modules
 get none and a banner is deleted from `cli.py` once the last definition under it leaves. Every
