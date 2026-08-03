@@ -18,7 +18,6 @@ from git_tree._git import (
     _active_rebase_branch,
     _active_rebase_onto,
     _carry_remote_to_root,
-    _check_submodule_health,
     _force_remove_worktree,
     _foreign_rebase_phrase,
     _foreign_rebase_reason,
@@ -32,10 +31,8 @@ from git_tree._git import (
     _is_tree_branch,
     _pending_sequencer_op,
     _register_child,
-    _run,
     _set_fork_commit,
     _stash_push_if_created,
-    _submodule_paths,
     _unset_tree_config,
     _use_color,
     _worktree_status,
@@ -56,6 +53,15 @@ from git_tree._graph import (
     discover,
     root_of,
     roots,
+)
+from git_tree._guards import (
+    _mid_rebase_branches,
+    _refuse_unfinished_replay,
+    _remove_blocking_dirt,
+    _require_clean_state,
+    _require_healthy_submodules,
+    _require_ready,
+    _require_worktrees,
 )
 from git_tree._prompt import (
     _proceed,
@@ -207,45 +213,6 @@ def cmd_detach(args: argparse.Namespace) -> None:
         if other_roots:
             print("\nRemaining tree(s):")
             print("\n\n".join(format_tree(graph, root=r) for r in other_roots))
-
-
-def _remove_blocking_dirt(wt: Path) -> bool:
-    """True if worktree `wt` — or any submodule at any depth — has uncommitted work that a
-    force-removal (`shutil.rmtree`) would irreversibly delete.
-
-    Force-removal bypasses git's own dirty/submodule refusals, so this is the sole backstop
-    and is deliberately conservative: `--ignore-submodules=none` overrides any submodule-ignore
-    config, and `--untracked-files=normal` overrides `status.showUntrackedFiles`, which is a
-    common large-repo perf setting that would otherwise hide the files this protects;
-    `foreach --recursive` reaches every depth; a populated-but-uninitialized submodule
-    (which `foreach` skips) and an inner `git status` that errors both count as "cannot prove
-    clean". `--quiet` drops foreach's translated "Entering '<path>'" banner so any remaining
-    stdout is real dirt.
-    """
-    if _worktree_status(wt, ignore_submodules="none", untracked_files="normal").dirty:
-        return True
-    try:
-        subs = _submodule_paths(wt)
-    except TreeError:
-        return True  # unreadable .gitmodules: cannot prove there is no submodule work to lose
-    for sub in subs:
-        d = wt / sub
-        try:
-            if not (d / ".git").exists() and d.is_dir() and any(d.iterdir()):
-                return True
-        except OSError:
-            return True  # can't inspect it, so can't prove it clean
-    proc = _run(
-        "git",
-        "submodule",
-        "--quiet",
-        "foreach",
-        "--recursive",
-        "git status --porcelain --ignore-submodules=none --untracked-files=normal",
-        cwd=wt,
-        check=False,
-    )
-    return proc.returncode != 0 or bool(proc.stdout.strip())
 
 
 def cmd_remove(args: argparse.Namespace) -> None:
@@ -598,34 +565,6 @@ def _replay_is_empty(cwd: Path) -> bool:
     return git_ok("diff", "--quiet", "HEAD", cwd=cwd)
 
 
-def _refuse_unfinished_replay(
-    branch: str, cwd: Path, stash: str | None, resume_cmd: list[str]
-) -> NoReturn:
-    """The rebase stopped with no conflict but with changes present, so it cannot be skipped."""
-    # Unstaged only (worktree vs index), not `diff HEAD`: those are the files that block
-    # `git rebase --continue`, and they are the only ones the advised stash may take. A pathspec
-    # built from `diff HEAD` would also list the staged conflict resolution, so running the advice
-    # verbatim would stash it, leave index == HEAD, and empty the replay.
-    files = git_lines("diff", "--name-only", cwd=cwd)
-    paths = " ".join(files) or "<file>..."
-    lines = [
-        f"{branch}'s rebase in {cwd} is stopped with unstaged changes that are not a conflict:",
-        *(f"  {f}" for f in files),
-        "`git rebase --continue` refuses while they are unstaged and `git rebase --skip` would",
-        "discard them. Move just these aside, leaving any staged conflict resolution in the index:",
-        f"    git -C {cwd} stash push -- {paths}",
-        f"Then re-run: {' '.join(resume_cmd)}",
-    ]
-    if stash:
-        lines.append(f"An earlier stash from this run is also waiting: git stash apply {stash}")
-    raise TreeError(
-        "\n".join(lines),
-        code=4,
-        branches=[branch],
-        remedy=list(resume_cmd),
-    )
-
-
 def _skip_empty_commits(
     cwd: Path, branch: str, stash: str | None, resume_cmd: list[str]
 ) -> str | None:
@@ -786,131 +725,6 @@ def _conflict_exit(
         conflicted_files=files,
         remedy=resume_cmd,
     )
-
-
-def _require_worktrees(branches: list[str], graph: Graph) -> None:
-    missing = [b for b in branches if not (graph.branches.get(b) and graph.branches[b].worktree)]
-    if not missing:
-        return
-    lines = ["These branches need worktrees before this operation can proceed:"]
-    for b in missing:
-        lines.append(f"  {b}")
-    lines.append("\nAdd worktrees with: git worktree add <path> <branch>")
-    raise TreeError("\n".join(lines), code=4, branches=missing)
-
-
-def _mid_rebase_branches(branches: list[str], graph: Graph) -> list[tuple[str, Path]]:
-    """The branches whose worktree has a rebase in progress, with that worktree."""
-    # A worktree that cannot be inspected answers no: the worktree and cleanliness gates report
-    # that far better than a guard built on top of them.
-    found: list[tuple[str, Path]] = []
-    for b in branches:
-        info = graph.branches.get(b)
-        if info and info.worktree and _has_active_rebase_safe(info.worktree):
-            found.append((b, info.worktree))
-    return found
-
-
-def _require_clean_state(branches: list[str], graph: Graph, resume_cmd: list[str]) -> None:
-    # An in-scope branch that is mid-rebase is a *resume point*, not a failure — PROVIDED the
-    # rebase is git-tree's own cascade (its `onto` is an ancestor-or-equal of the branch's
-    # tree-parent) and its conflicts are resolved; `_advance_branch` will finish it. So:
-    #   - clean git-tree mid-rebase        -> allow
-    #   - git-tree mid-rebase, unmerged    -> refuse: resolve, then re-run resume_cmd
-    #   - foreign mid-rebase (bad onto)    -> refuse: not ours to drive
-    #   - conflicted, not mid-rebase       -> refuse (as before)
-    # Plain dirty (no conflict, no rebase) still passes: `_rebase_branch` stashes it.
-    unresolved: list[tuple[str, Path]] = []
-    foreign: list[tuple[str, Path]] = []
-    pending: list[tuple[str, Path, str]] = []
-    for b in branches:
-        info = graph.branches.get(b)
-        if not info or not info.worktree:
-            continue
-        wt = info.worktree
-        if _has_active_rebase(wt):
-            if not _is_git_tree_rebase(wt, graph.parent_of.get(b)):
-                foreign.append((b, wt))
-            elif _has_unmerged(wt):
-                unresolved.append((b, wt))
-            # else: a clean, git-tree-owned mid-rebase — allow (it will be finished).
-        elif (op := _pending_sequencer_op(wt)) is not None:
-            pending.append((b, wt, op))
-        elif _worktree_status(wt).conflicted:
-            unresolved.append((b, wt))
-    if pending:
-        raise TreeError(
-            "These branches have an operation in progress that rebasing would discard:\n"
-            + "\n".join(f"  {b}  (a {op} is in progress in: {wt})" for b, wt, op in pending)
-            + "\n\nFinish or abort it there, then re-run.",
-            code=4,
-            branches=[b for b, _, _ in pending],
-        )
-    if unresolved and not foreign:
-        lines = [
-            "Resolve the conflicts and `git add` them, then re-run:",
-            f"    {' '.join(resume_cmd)}",
-        ]
-        lines += [f"  {b}  (in: {wt})" for b, wt in unresolved]
-        raise TreeError(
-            "\n".join(lines),
-            code=4,
-            kind=ErrorKind.UNRESOLVED_CONFLICTS,
-            branches=[b for b, _ in unresolved],
-        )
-    if foreign or unresolved:
-        lines = ["These branches are not in a clean state:"]
-        lines += [
-            f"  {b}  (a rebase not started by git-tree is in progress — resolve or "
-            f"`git rebase --abort` in: {wt})"
-            for b, wt in foreign
-        ]
-        lines += [f"  {b}  (unresolved conflicts — resolve in: {wt})" for b, wt in unresolved]
-        raise TreeError("\n".join(lines), code=4, branches=[b for b, _ in foreign + unresolved])
-
-
-def _require_ready(branches: list[str], graph: Graph, resume_cmd: list[str]) -> None:
-    """Preflight gate for a cascade: worktrees present, submodules healthy, worktrees clean
-    (an in-scope git-tree mid-rebase is allowed — it's a resume point, see `_require_clean_state`).
-
-    Order matters: worktree and submodule-health checks run before `_require_clean_state`,
-    because `git status` crashes on a corrupted submodule. Each underlying check is a no-op
-    on an empty list.
-    """
-    _require_worktrees(branches, graph)
-    _require_healthy_submodules(branches, graph)
-    _require_clean_state(branches, graph, resume_cmd)
-
-
-# ---------------------------------------------------------------------------
-# Submodule helpers
-# ---------------------------------------------------------------------------
-
-
-def _require_healthy_submodules(branches: list[str], graph: Graph) -> None:
-    """Pre-flight: verify each worktree's submodules have valid .git state."""
-    unhealthy: list[tuple[str, str]] = []
-    for b in branches:
-        info = graph.branches.get(b)
-        if not info or not info.worktree:
-            continue
-        try:
-            sub_paths = _submodule_paths(info.worktree)
-        except TreeError:
-            # Unlike the removal gate, nothing here is about to delete anything, so an
-            # unreadable .gitmodules is not worth blocking a cascade over. The rebase itself
-            # will surface any real submodule problem.
-            continue
-        for sub_path in sub_paths:
-            if not _check_submodule_health(info.worktree, sub_path):
-                unhealthy.append((b, sub_path))
-    if not unhealthy:
-        return
-    lines = ["These branches have corrupted submodule state:"]
-    for b, sub_path in unhealthy:
-        lines.append(f"  {b}  (submodule: {sub_path})")
-    lines.append("\nFix with: git tree rebuild <branch>")
-    raise TreeError("\n".join(lines), code=4)
 
 
 @dataclass(frozen=True)
