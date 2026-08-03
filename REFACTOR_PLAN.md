@@ -1,6 +1,6 @@
 # Refactor plan: split `git_tree/cli.py` into modules
 
-Status: **in progress** (see "Current state" at the end). This document is the agreed plan,
+Status: **complete** (see "Current state" at the end). This document is the agreed plan,
 reviewed by four independent reviewer passes and revised twice. Read it in full before starting.
 
 ## Goal
@@ -345,17 +345,19 @@ of `["git","tree","propagate",<branch>]`, and re-running that argv finishes the 
 
 ## Current state
 
-**The split is complete.** All 21 modules exist, `cli.py` holds only the CLI surface (10 top-level
-names: `_version`, `_EPILOG`, `_KIND_BY_CODE`, `_envelope`, `_error_envelope`, `_render_error`,
-`cmd_completions`, `cmd_manpage`, `_build_parser`, `main`), and the import DAG has zero violations.
-Remaining: step 21 (AGENTS.md) and step 22 (`tests/test_repo_structure.py`).
+**Done.** All 22 steps landed. `git_tree/cli.py` went from 3493 lines and 144 top-level names to
+409 lines and 10 (`_version`, `_EPILOG`, `_KIND_BY_CODE`, `_envelope`, `_error_envelope`,
+`_render_error`, `cmd_completions`, `cmd_manpage`, `_build_parser`, `main`), with the other 134
+names spread across 20 new modules in an acyclic import graph that `tests/test_repo_structure.py`
+now enforces.
 
 Steps 10-20 landed as three batch commits rather than eleven: one subagent run produces all of a
 batch's modules in a single working-tree state, and splitting that into per-module commits would
-mean hand-splitting `cli.py`'s hunks and stashing to gate each intermediate state.
+have meant hand-splitting `cli.py`'s hunks and stashing to gate each intermediate state.
 
-Baseline held throughout: 144 top-level names, every definition byte-identical to `d727b82`, 292
-passed / 5 xfailed at every step, and all four goldens unchanged.
+Held at every step: 144 top-level names with no name owned twice, every definition byte-identical
+to its `d727b82` source, all four goldens unchanged, and 292 passed / 5 xfailed (296 passed once
+the structure test landed). No `xfail` marker was removed, relaxed, or allowed to XPASS.
 
 ## Import layering test
 
