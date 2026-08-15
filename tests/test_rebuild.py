@@ -47,6 +47,31 @@ class TestRebuildMidRebase:
         assert (wt / "shared.txt").exists()
         assert repo.git("rev-parse", "--abbrev-ref", "HEAD", cwd=wt) == "A"
 
+    @pytest.mark.xfail(
+        strict=True,
+        reason="rebuild's --force waives two independent gates, dirt and mid-rebase, and prints "
+        "no warning for either, while its plan ('Remove corrupted worktree / Recreate worktree') "
+        "reads as a repair. Someone forcing past scratch edits also silently loses a paused "
+        "rebase and every conflict resolved in it. cmd_remove already prints a per-branch banner "
+        "for each ('--force will destroy uncommitted changes...', '--force will discard the "
+        "rebase in progress in:'). Fix: print both in cmd_rebuild before the confirm, reusing "
+        "that wording. Related, not asserted here: rebuild has no --dry-run, so the banner is the "
+        "only preview there can be.",
+    )
+    def test_force_warns_before_discarding_the_rebase(
+        self, repo: RepoHelper, tmp_path, capsys
+    ) -> None:
+        """`--force` is one flag over two risks, so it must say which one it is acting on.
+
+        The branch ref has not moved, so the resolved conflicts exist only in this worktree.
+        Destroying them silently, under a plan that reads as a repair, is the whole problem.
+        """
+        stopped_rebase(repo, tmp_path)
+
+        cmd_rebuild(_ns("A", force=True))
+
+        assert "discard the rebase in progress" in capsys.readouterr().out
+
 
 class TestRebuildDirtGate:
     """Rebuild uses the same gate as remove. A bare `git status` is not enough: it honours

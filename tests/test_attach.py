@@ -106,6 +106,50 @@ class TestAttach:
         assert "No common history" in err
 
 
+class TestAttachForkCommit:
+    @pytest.mark.xfail(
+        strict=True,
+        reason="_register_child (_git.py:177) always overwrites tree-fork-commit with "
+        "merge-base(parent, child), so re-attaching a branch to the parent it already has "
+        "replaces a still-valid recorded fork with the drifted merge-base. Once the parent has "
+        "been rewritten, merge-base falls below the branch's own commits and the next propagate "
+        "replays the parent's old commits too, which is precisely what the fork commit exists to "
+        "prevent (AGENTS.md, Dependency storage). It is reachable through the documented repair "
+        "path: the git-tree-doctor skill and README step 1 both reach for attach. Fix: in "
+        "cmd_attach, keep the stored fork when the parent is unchanged and the stored value is "
+        "still an ancestor of the branch (the validity test _get_fork_commit already applies at "
+        "_graph.py:40); recompute only when the parent actually changes, where the old boundary "
+        "refers to a different branch and is meaningless. The 'does not appear to descend' "
+        "warning already printed here is a hint, not a gate, and says nothing about the fork.",
+    )
+    def test_reattaching_to_the_same_parent_keeps_a_valid_fork(
+        self, repo: RepoHelper, monkeypatch, tmp_path
+    ) -> None:
+        """Attach is advertised as recording an edge, so it must not quietly widen the replay set.
+
+        main gains M1, b forks there and adds B1, then main is rewritten so M1 leaves its history.
+        The recorded fork still bounds b's own commits; merge-base no longer does.
+        """
+        repo.commit("m.txt", "m1", "M1")
+        m1 = repo.git("rev-parse", "HEAD")
+        repo.branch("b", parent="main")
+        repo.git("config", "branch.b.tree-fork-commit", m1)
+        wt_b = repo.worktree("b", str(tmp_path / "wt-b"))
+        (wt_b / "b1.txt").write_text("b1")
+        repo.git("add", "b1.txt", cwd=wt_b)
+        repo.git("commit", "-m", "B1", cwd=wt_b)
+
+        repo.git("commit", "--amend", "-m", "M1 rewritten")  # main rewritten; M1 orphaned
+        assert repo.git("merge-base", "main", "b") != m1  # merge-base has drifted below it
+
+        monkeypatch.chdir(wt_b)  # attach acts on the current branch
+        cmd_attach(_ns(parent="main"))
+
+        assert repo.git("config", "--get", "branch.b.tree-fork-commit") == m1
+        fork = repo.git("config", "--get", "branch.b.tree-fork-commit")
+        assert repo.git("log", "--oneline", f"{fork}..b").count("\n") == 0  # B1 alone
+
+
 class TestDetach:
     def _branch_config(self, repo: RepoHelper, branch: str) -> subprocess.CompletedProcess:
         return subprocess.run(

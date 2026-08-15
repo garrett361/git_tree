@@ -12,7 +12,7 @@ from git_tree._git import _has_active_rebase
 from git_tree._graph import discover
 from git_tree.cli import cmd_propagate
 
-from .conftest import RepoHelper, cli_args
+from .conftest import RepoHelper, cli_args, stopped_rebase
 
 
 def _ns(
@@ -354,6 +354,34 @@ class TestPropagateBranchArg:
         assert "new on main" in b_log
         c_log = repo.git("log", "--oneline", "c")
         assert "new on main" in c_log
+
+
+class TestPropagateFromDetachedHead:
+    @pytest.mark.xfail(
+        strict=True,
+        reason="propagate is the resume verb, and the obvious place to type it is the worktree "
+        "that just stopped on a conflict, where a rebase has left HEAD detached. current_branch() "
+        "refuses there with a bare `fatal: not on a branch (detached HEAD)` (exit 1) and says "
+        "nothing about resuming. cmd_rebase already handles this exact case at _cmd_rebase.py:52, "
+        "recovering the branch with _active_rebase_branch() and naming `git tree propagate "
+        "<stuck>`. Fix: do the same in cmd_propagate when args.branch is None and "
+        "current_branch() raises, guarded by git_ok('rev-parse', '--git-dir') so a non-repo cwd "
+        "still reports itself.",
+    )
+    def test_bare_propagate_in_a_stuck_worktree_names_the_resume_command(
+        self, repo: RepoHelper, monkeypatch, tmp_path
+    ) -> None:
+        """The printed conflict advice names the branch, so following it works; improvising does
+        not. Someone who cds to the worktree and types `git tree propagate` gets a message about
+        detached HEAD, which reads as a different problem entirely."""
+        wt = stopped_rebase(repo, tmp_path)
+        monkeypatch.chdir(wt)
+
+        with pytest.raises(TreeError) as exc:
+            cmd_propagate(_ns())
+
+        assert exc.value.code == 4
+        assert "git tree propagate A" in exc.value.message
 
 
 class TestWorktreeValidation:
