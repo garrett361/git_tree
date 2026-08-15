@@ -66,6 +66,25 @@ class TestAttach:
             cmd_attach(_ns(parent="b"))
         assert discover().parent_of["a"] == "main"
 
+    def test_invalid_parents_raise_before_side_effects(
+        self, repo: RepoHelper, monkeypatch, capsys
+    ) -> None:
+        # A tree-parent must be a local branch: discover() drops any other edge and reports the
+        # child as orphaned, so each of these must be refused with nothing written.
+        repo.git("tag", "v1")
+        repo.git("branch", "feature")
+        repo.checkout("feature")
+
+        # input must never be consulted — the parent is given, so nothing may prompt.
+        monkeypatch.setattr("builtins.input", lambda _: pytest.fail("prompted"))
+
+        for bad in ("v1", "origin/main", "no-such-branch"):
+            with pytest.raises(TreeError) as exc:
+                cmd_attach(_ns(parent=bad))
+            assert exc.value.code == 4
+            assert "is not a local branch" in capsys.readouterr().err
+            assert "feature" not in discover().parent_of
+
     def test_attach_disjoint_history_clean_error(self, repo: RepoHelper, capsys, tmp_path) -> None:
         """Attaching to a branch with no common history is a TreeError, not a traceback.
 
