@@ -15,13 +15,23 @@ if TYPE_CHECKING:
 
 
 def cmd_push(args: argparse.Namespace) -> dict | None:
-    branch = current_branch()
+    if args.branch is not None:
+        branch = args.branch
+        # Naming a branch that doesn't exist would otherwise surface as "not a tree-branch",
+        # which reads as a tree problem rather than the typo it is.
+        if not git_ok("rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"):
+            raise TreeError(f"No such branch: {branch}", code=4)
+    else:
+        branch = current_branch()
     graph = discover()
 
     # Hard-error (unlike cmd_log's benign exit) so a stray `git tree push` on a plain
     # branch like `main` can never force-push it to the branch's own `branch.remote`.
     if branch not in graph.parent_of and branch not in graph.children_of:
-        raise TreeError("Not on a tree-branch.", code=5)
+        raise TreeError(
+            f"{branch} is not a tree-branch." if args.branch else "Not on a tree-branch.",
+            code=5,
+        )
 
     descendants = graph.downstream_from(branch)
     push_set = [branch] + descendants

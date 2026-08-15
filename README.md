@@ -68,7 +68,7 @@ git tree rebuild [branch]              # rebuild a corrupted worktree from the b
 git tree propagate [branch]            # cascade a branch's changes to descendants (default: current; also resumes after a conflict)
 git tree rebase <target> [branch]      # reparent + rebase a branch onto <target>, then propagate (default: current)
 git tree split                         # split current branch into parent + child
-git tree push                          # push current branch + descendants (--force-with-lease)
+git tree push [branch]                 # push a branch + descendants (default: current; --force-with-lease)
 git tree log                           # show a git log graph across the whole tree
 git tree skills [--install]            # list the bundled agent skills; --install links them into your harnesses
 git tree manpage [--install]           # emit the man page (roff); --install writes it to the man path

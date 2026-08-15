@@ -304,7 +304,7 @@ class TestCompletionGeneration:
         zsh = _render_completions(_build_parser(), "zsh")
         bash = _render_completions(_build_parser(), "bash")
         foreach = "git for-each-ref --format='%(refname:short)' refs/heads/"
-        for name in ("propagate", "rebase", "attach", "detach", "remove", "rebuild"):
+        for name in ("propagate", "rebase", "attach", "detach", "remove", "rebuild", "push"):
             assert "__git_heads" in self._arm(zsh, name)
             assert foreach in self._arm(bash, name)
         assert "__git_heads" in self._arm(zsh, "split")  # --after

@@ -291,8 +291,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "-y", "--yes", action="store_true", help="Skip the --child rewind confirmation prompt"
     )
 
-    push_p = sub.add_parser("push", help="Push current branch + descendants", parents=[common])
+    push_p = sub.add_parser("push", help="Push a branch + descendants", parents=[common])
     push_p.set_defaults(func=cmd_push)
+    _set_completer(
+        push_p.add_argument("branch", nargs="?", help="Branch to push from (default: current)"),
+        "git_heads",
+    )
     push_p.add_argument("--dry-run", action="store_true", help="Show what would be done")
     push_p.add_argument("-y", "--yes", action="store_true", help="Skip the confirmation prompt")
 

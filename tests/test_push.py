@@ -10,8 +10,8 @@ from git_tree.cli import cmd_push, main
 from .conftest import RepoHelper, cli_args
 
 
-def _ns(dry_run: bool = False, yes: bool = False) -> object:
-    return cli_args(dry_run=dry_run, yes=yes)
+def _ns(dry_run: bool = False, yes: bool = False, branch: str | None = None) -> object:
+    return cli_args(dry_run=dry_run, yes=yes, branch=branch)
 
 
 def _no_confirm(_message: str) -> bool:
@@ -345,3 +345,68 @@ class TestPush:
         assert env["ok"] is False
         assert env["error"]["kind"] == "lease_rejected"
         assert "feature" in env["error"]["branches"]
+
+
+class TestPushBranchArgument:
+    def _stack(self, repo: RepoHelper, tmp_path) -> None:
+        """main <- b <- c, plus a sibling d that must stay out of any push of b."""
+        repo.branch("b", parent="main")
+        wt_b = repo.worktree("b", str(tmp_path / "wt-b"))
+        (wt_b / "b1.txt").write_text("b1")
+        repo.git("add", "b1.txt", cwd=wt_b)
+        repo.git("commit", "-m", "b commit", cwd=wt_b)
+        repo.git("branch", "c", cwd=wt_b)  # after b's commit, so c forks from b's tip
+        repo.set_parent("c", "b")
+        wt_c = repo.worktree("c", str(tmp_path / "wt-c"))
+        (wt_c / "c1.txt").write_text("c1")
+        repo.git("add", "c1.txt", cwd=wt_c)
+        repo.git("commit", "-m", "c commit", cwd=wt_c)
+        repo.branch("d", parent="main")
+
+    def test_named_branch_pushes_its_own_subtree(
+        self, repo: RepoHelper, monkeypatch, tmp_path
+    ) -> None:
+        self._stack(repo, tmp_path)
+        monkeypatch.setattr("builtins.input", lambda _: "y")
+
+        cmd_push(_ns(branch="b"))  # from the root worktree, still on main
+
+        remote_branches = repo.git("ls-remote", "--heads", str(repo.origin))
+        assert "refs/heads/b" in remote_branches
+        assert "refs/heads/c" in remote_branches
+        assert "refs/heads/d" not in remote_branches  # sibling, not downstream of b
+
+    def test_named_branch_ignores_a_non_tree_current_branch(
+        self, repo: RepoHelper, monkeypatch, tmp_path
+    ) -> None:
+        # The tree-membership check must follow the branch that was named, not the one we
+        # happen to be standing on — otherwise naming a branch would be refusable from here.
+        self._stack(repo, tmp_path)
+        repo.git("checkout", "-b", "solo")  # plain branch, no tree config
+
+        monkeypatch.setattr("builtins.input", lambda _: "y")
+        cmd_push(_ns(branch="b"))
+
+        assert "refs/heads/b" in repo.git("ls-remote", "--heads", str(repo.origin))
+
+    def test_nonexistent_named_branch_reports_the_typo(self, repo: RepoHelper, tmp_path) -> None:
+        self._stack(repo, tmp_path)
+        before = repo.git("ls-remote", "--heads", str(repo.origin))
+
+        with pytest.raises(TreeError) as exc:
+            cmd_push(_ns(branch="nope", yes=True))
+
+        assert exc.value.message == "No such branch: nope"
+        assert exc.value.code == 4
+        assert repo.git("ls-remote", "--heads", str(repo.origin)) == before
+
+    def test_named_non_tree_branch_refuses(self, repo: RepoHelper, tmp_path) -> None:
+        self._stack(repo, tmp_path)
+        repo.git("branch", "solo")  # exists, but never registered in the tree
+
+        with pytest.raises(TreeError) as exc:
+            cmd_push(_ns(branch="solo", yes=True))
+
+        assert exc.value.message == "solo is not a tree-branch."
+        assert exc.value.code == 5
+        assert "refs/heads/solo" not in repo.git("ls-remote", "--heads", str(repo.origin))
