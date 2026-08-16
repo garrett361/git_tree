@@ -4,7 +4,7 @@ import argparse
 
 import pytest
 
-from git_tree.cli import cmd_propagate
+from git_tree._cmd_propagate import cmd_propagate
 
 from .conftest import RepoHelper, cli_args
 

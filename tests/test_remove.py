@@ -5,10 +5,11 @@ import os
 
 import pytest
 
+from git_tree._cmd_remove import cmd_remove
 from git_tree._errors import TreeError
 from git_tree._git import _has_active_rebase
 from git_tree._graph import discover
-from git_tree.cli import cmd_remove, main
+from git_tree.cli import main
 
 from .conftest import FZF_SELECT, RepoHelper, cli_args, stopped_rebase
 

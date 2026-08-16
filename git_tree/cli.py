@@ -11,19 +11,9 @@ from importlib import metadata
 from pathlib import Path
 from typing import NoReturn
 
-from git_tree._cmd_attach import cmd_attach
-from git_tree._cmd_branch import cmd_branch
-from git_tree._cmd_detach import cmd_detach
-from git_tree._cmd_log import cmd_log
-from git_tree._cmd_propagate import cmd_propagate
-from git_tree._cmd_push import cmd_push
-from git_tree._cmd_rebase import cmd_rebase
-from git_tree._cmd_rebuild import cmd_rebuild
-from git_tree._cmd_remove import cmd_remove
-from git_tree._cmd_skills import cmd_skills
-from git_tree._cmd_split import cmd_split
 from git_tree._cmd_tree import cmd_tree
 from git_tree._errors import ConflictError, ErrorKind, TreeError
+from git_tree._registry import COMMANDS
 from git_tree._render import _render_completions, _render_manpage, _set_completer
 
 
@@ -125,9 +115,10 @@ def _render_error(args: argparse.Namespace, err: TreeError, out) -> NoReturn:
 def _build_parser() -> argparse.ArgumentParser:
     """Build the full argument parser. Sole source of truth for the command surface: `main`
     dispatches on it (via each subparser's set_defaults(func=...)), and `_render_manpage`, `-h`,
-    and `_render_completions` (both shells) all derive from it. A subcommand added here is wired
-    for dispatch, help, the man page, and completions by that one `add_parser` block; a value arg
-    that should complete branches or paths is tagged via `_set_completer(..., "git_heads")` (or
+    and `_render_completions` (both shells) all derive from it. Subcommands come from `COMMANDS`,
+    which each handler populates via its own `@subcommand` decorator, so adding one means writing
+    that decorator and importing the module in `git_tree/__init__.py`; a value arg that should
+    complete branches or paths is tagged via `_set_completer(..., "git_heads")` (or
     `"directories"`)."""
     parser = argparse.ArgumentParser(
         prog="git-tree",
@@ -162,167 +153,14 @@ def _build_parser() -> argparse.ArgumentParser:
     common.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     sub = parser.add_subparsers(dest="command")
 
-    propagate_p = sub.add_parser(
-        "propagate", help="Propagate changes to all descendants", parents=[common]
-    )
-    propagate_p.set_defaults(func=cmd_propagate)
-    _set_completer(
-        propagate_p.add_argument(
-            "branch", nargs="?", help="Branch to propagate from (default: current)"
-        ),
-        "git_heads",
-    )
-    propagate_p.add_argument("--dry-run", action="store_true", help="Show what would be done")
-    propagate_p.add_argument(
-        "--no-auto-rerere", action="store_true", help="Disable auto-continue via rerere"
-    )
-    propagate_p.add_argument(
-        "-y", "--yes", action="store_true", help="Skip the confirmation prompt"
-    )
+    for spec in COMMANDS:
+        p = sub.add_parser(spec.name, help=spec.help, parents=[common])
+        p.set_defaults(func=spec.handler)
+        if spec.arguments is not None:
+            spec.arguments(p)
 
-    rebase_p = sub.add_parser(
-        "rebase", help="Rebase a branch + descendants onto new base", parents=[common]
-    )
-    rebase_p.set_defaults(func=cmd_rebase)
-    _set_completer(
-        rebase_p.add_argument("target", help="Branch or ref to rebase onto"), "git_heads"
-    )
-    _set_completer(
-        rebase_p.add_argument("branch", nargs="?", help="Branch to rebase (default: current)"),
-        "git_heads",
-    )
-    rebase_p.add_argument("--dry-run", action="store_true", help="Show what would be done")
-    rebase_p.add_argument(
-        "--no-auto-rerere", action="store_true", help="Disable auto-continue via rerere"
-    )
-    rebase_p.add_argument("-y", "--yes", action="store_true", help="Skip the confirmation prompt")
-
-    branch_p = sub.add_parser(
-        "branch", help="Create or adopt a child branch with a worktree", parents=[common]
-    )
-    branch_p.set_defaults(func=cmd_branch)
-    _set_completer(
-        branch_p.add_argument("path", help="Worktree path for the branch"), "directories"
-    )
-    branch_p.add_argument("name", help="Branch name (new, or an existing branch to adopt)")
-    branch_p.add_argument(
-        "--no-submodule-init",
-        action="store_true",
-        help="Skip automatic `git submodule update --init --recursive` after creating the worktree",
-    )
-
-    attach_p = sub.add_parser("attach", help="Attach current branch to tree", parents=[common])
-    attach_p.set_defaults(func=cmd_attach)
-    _set_completer(
-        attach_p.add_argument("parent", nargs="?", help="Parent branch (fzf if omitted)"),
-        "git_heads",
-    )
-
-    detach_p = sub.add_parser("detach", help="Remove a branch from tree", parents=[common])
-    detach_p.set_defaults(func=cmd_detach)
-    _set_completer(
-        detach_p.add_argument("branch", nargs="?", help="Branch to detach (default: current)"),
-        "git_heads",
-    )
-    detach_p.add_argument("-y", "--yes", action="store_true", help="Skip the confirmation prompt")
-
-    remove_p = sub.add_parser(
-        "remove",
-        help="Remove a subtree's worktrees and unregister its branches (keeps refs)",
-        parents=[common],
-    )
-    remove_p.set_defaults(func=cmd_remove)
-    _set_completer(
-        remove_p.add_argument("branch", nargs="?", help="Branch to remove (default: pick via fzf)"),
-        "git_heads",
-    )
-    remove_p.add_argument("--dry-run", action="store_true", help="Show what would be done")
-    remove_p.add_argument("-y", "--yes", action="store_true", help="Skip the confirmation prompt")
-    remove_p.add_argument(
-        "--force",
-        action="store_true",
-        help="Remove even if a worktree or its submodules have uncommitted changes",
-    )
-
-    rebuild_p = sub.add_parser(
-        "rebuild",
-        help="Rebuild a corrupted worktree from the branch tip (keeps branch ref and tree config)",
-        parents=[common],
-    )
-    rebuild_p.set_defaults(func=cmd_rebuild)
-    _set_completer(
-        rebuild_p.add_argument(
-            "branch", nargs="?", help="Branch to rebuild (default: pick via fzf)"
-        ),
-        "git_heads",
-    )
-    rebuild_p.add_argument(
-        "--force", action="store_true", help="Proceed even if worktree has uncommitted changes"
-    )
-    rebuild_p.add_argument("-y", "--yes", action="store_true", help="Skip the confirmation prompt")
-
-    split_p = sub.add_parser(
-        "split", help="Split current branch into parent + child", parents=[common]
-    )
-    split_p.set_defaults(func=cmd_split)
-    _set_completer(
-        split_p.add_argument(
-            "--after", metavar="COMMIT", help="Commit to split after (fzf if omitted)"
-        ),
-        "git_heads",
-    )
-    split_p.add_argument("--name", metavar="BRANCH", help="New branch name (prompt if omitted)")
-    split_p.add_argument(
-        "--child",
-        action="store_true",
-        help="Keep the current branch for the early commits; new branch takes the rest",
-    )
-    split_wt = split_p.add_mutually_exclusive_group()
-    _set_completer(
-        split_wt.add_argument(
-            "--worktree", metavar="PATH", help="Create the new branch's worktree at PATH"
-        ),
-        "directories",
-    )
-    split_wt.add_argument(
-        "--no-worktree", action="store_true", help="Don't create a worktree for the new branch"
-    )
-    split_p.add_argument(
-        "-y", "--yes", action="store_true", help="Skip the --child rewind confirmation prompt"
-    )
-
-    push_p = sub.add_parser("push", help="Push a branch + descendants", parents=[common])
-    push_p.set_defaults(func=cmd_push)
-    _set_completer(
-        push_p.add_argument("branch", nargs="?", help="Branch to push from (default: current)"),
-        "git_heads",
-    )
-    push_p.add_argument("--dry-run", action="store_true", help="Show what would be done")
-    push_p.add_argument("-y", "--yes", action="store_true", help="Skip the confirmation prompt")
-
-    log_p = sub.add_parser("log", help="Show git log graph for all tree-branches", parents=[common])
-    log_p.set_defaults(func=cmd_log)
-
-    skills_p = sub.add_parser(
-        "skills",
-        help="List the bundled agent skills; --install links them into your agent harnesses",
-        parents=[common],
-    )
-    skills_p.set_defaults(func=cmd_skills)
-    skills_p.add_argument(
-        "--install",
-        action="store_true",
-        help="Install the skills into ~/.claude/skills and ~/.agents/skills",
-    )
-    _set_completer(
-        skills_p.add_argument(
-            "--dir",
-            metavar="DIR",
-            help="Use DIR instead of the per-harness directories (listing and install alike)",
-        ),
-        "directories",
-    )
-
+    # These two set no func: main() dispatches them by name before the args.func path, because
+    # they write non-envelope output to the real stdout and cmd_manpage needs the parser itself.
     completions_p = sub.add_parser(
         "completions", help="Emit shell completion script", parents=[common]
     )

@@ -7,8 +7,9 @@ import re
 
 import pytest
 
+from git_tree._cmd_propagate import cmd_propagate
 from git_tree._render import _render_completions
-from git_tree.cli import _build_parser, cmd_propagate, main
+from git_tree.cli import _build_parser, main
 
 from .conftest import RepoHelper, cli_args
 

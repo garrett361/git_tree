@@ -5,7 +5,8 @@ import subprocess as sp
 
 import pytest
 
-from git_tree.cli import cmd_log, main
+from git_tree._cmd_log import cmd_log
+from git_tree.cli import main
 
 from .conftest import RepoHelper
 

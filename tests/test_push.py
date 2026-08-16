@@ -4,8 +4,9 @@ import json
 
 import pytest
 
+from git_tree._cmd_push import cmd_push
 from git_tree._errors import TreeError
-from git_tree.cli import cmd_push, main
+from git_tree.cli import main
 
 from .conftest import RepoHelper, cli_args
 

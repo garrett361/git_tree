@@ -4,8 +4,10 @@ from pathlib import Path
 
 import pytest
 
+from git_tree._cmd_propagate import cmd_propagate
+from git_tree._cmd_rebase import cmd_rebase
+from git_tree._cmd_remove import cmd_remove
 from git_tree._graph import discover
-from git_tree.cli import cmd_propagate, cmd_rebase, cmd_remove
 
 from .conftest import RepoHelper, cli_args
 

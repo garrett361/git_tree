@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import pytest
 
+from git_tree._cmd_split import cmd_split
 from git_tree._errors import TreeError
 from git_tree._graph import _root_remote, discover
-from git_tree.cli import cmd_split
 
 from .conftest import RepoHelper, cli_args
 
