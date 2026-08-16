@@ -23,6 +23,8 @@ from git_tree._git import (
 )
 from git_tree._graph import _get_fork_commit
 from git_tree._prompt import _proceed, _prompt, _require_input, _select_one
+from git_tree._registry import subcommand
+from git_tree._render import _set_completer
 
 if TYPE_CHECKING:
     import argparse
@@ -165,6 +167,37 @@ def _split_child(
         print(f"  reparented onto {new_name}: {', '.join(children)}")
 
 
+def arguments(p: argparse.ArgumentParser) -> None:
+    _set_completer(
+        p.add_argument("--after", metavar="COMMIT", help="Commit to split after (fzf if omitted)"),
+        "git_heads",
+    )
+    p.add_argument("--name", metavar="BRANCH", help="New branch name (prompt if omitted)")
+    p.add_argument(
+        "--child",
+        action="store_true",
+        help="Keep the current branch for the early commits; new branch takes the rest",
+    )
+    wt = p.add_mutually_exclusive_group()
+    _set_completer(
+        wt.add_argument(
+            "--worktree", metavar="PATH", help="Create the new branch's worktree at PATH"
+        ),
+        "directories",
+    )
+    wt.add_argument(
+        "--no-worktree", action="store_true", help="Don't create a worktree for the new branch"
+    )
+    p.add_argument(
+        "-y", "--yes", action="store_true", help="Skip the --child rewind confirmation prompt"
+    )
+
+
+@subcommand(
+    "split",
+    "Split current branch into parent + child",
+    arguments=arguments,
+)
 def cmd_split(args: argparse.Namespace) -> None:
     branch = current_branch()
     parent = _get_tree_parent(branch)

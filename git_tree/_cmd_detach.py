@@ -14,11 +14,26 @@ from git_tree._git import (
 )
 from git_tree._graph import discover, root_of, roots
 from git_tree._prompt import _proceed
+from git_tree._registry import subcommand
+from git_tree._render import _set_completer
 
 if TYPE_CHECKING:
     import argparse
 
 
+def arguments(p: argparse.ArgumentParser) -> None:
+    _set_completer(
+        p.add_argument("branch", nargs="?", help="Branch to detach (default: current)"),
+        "git_heads",
+    )
+    p.add_argument("-y", "--yes", action="store_true", help="Skip the confirmation prompt")
+
+
+@subcommand(
+    "detach",
+    "Remove a branch from tree",
+    arguments=arguments,
+)
 def cmd_detach(args: argparse.Namespace) -> None:
     branch = args.branch or current_branch()
     parent = _get_tree_parent(branch)

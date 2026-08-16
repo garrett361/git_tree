@@ -15,11 +15,28 @@ from git_tree._git import (
     git_echo_ok,
     git_ok,
 )
+from git_tree._registry import subcommand
+from git_tree._render import _set_completer
 
 if TYPE_CHECKING:
     import argparse
 
 
+def arguments(p: argparse.ArgumentParser) -> None:
+    _set_completer(p.add_argument("path", help="Worktree path for the branch"), "directories")
+    p.add_argument("name", help="Branch name (new, or an existing branch to adopt)")
+    p.add_argument(
+        "--no-submodule-init",
+        action="store_true",
+        help="Skip automatic `git submodule update --init --recursive` after creating the worktree",
+    )
+
+
+@subcommand(
+    "branch",
+    "Create or adopt a child branch with a worktree",
+    arguments=arguments,
+)
 def cmd_branch(args: argparse.Namespace) -> None:
     parent = current_branch()
     name: str = args.name

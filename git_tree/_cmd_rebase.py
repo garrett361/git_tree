@@ -34,11 +34,29 @@ from git_tree._guards import (
     _require_ready,
 )
 from git_tree._prompt import _proceed
+from git_tree._registry import subcommand
+from git_tree._render import _set_completer
 
 if TYPE_CHECKING:
     import argparse
 
 
+def arguments(p: argparse.ArgumentParser) -> None:
+    _set_completer(p.add_argument("target", help="Branch or ref to rebase onto"), "git_heads")
+    _set_completer(
+        p.add_argument("branch", nargs="?", help="Branch to rebase (default: current)"),
+        "git_heads",
+    )
+    p.add_argument("--dry-run", action="store_true", help="Show what would be done")
+    p.add_argument("--no-auto-rerere", action="store_true", help="Disable auto-continue via rerere")
+    p.add_argument("-y", "--yes", action="store_true", help="Skip the confirmation prompt")
+
+
+@subcommand(
+    "rebase",
+    "Rebase a branch + descendants onto new base",
+    arguments=arguments,
+)
 def cmd_rebase(args: argparse.Namespace) -> None:
     if args.branch is not None:
         branch = args.branch

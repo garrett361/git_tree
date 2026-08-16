@@ -15,6 +15,7 @@ PACKAGE = Path(__file__).resolve().parent.parent / "git_tree"
 
 RANK = {
     "_errors": 0,
+    "_registry": 0,
     "_render": 0,
     "_git": 1,
     "_prompt": 1,

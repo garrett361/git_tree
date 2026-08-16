@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from git_tree._errors import TreeError
+from git_tree._registry import subcommand
+from git_tree._render import _set_completer
 
 if TYPE_CHECKING:
     import argparse
@@ -53,6 +55,27 @@ def _place_skill(source: Path, dest: Path) -> str:
     return "Updated" if replaced else "Installed"
 
 
+def arguments(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "--install",
+        action="store_true",
+        help="Install the skills into ~/.claude/skills and ~/.agents/skills",
+    )
+    _set_completer(
+        p.add_argument(
+            "--dir",
+            metavar="DIR",
+            help="Use DIR instead of the per-harness directories (listing and install alike)",
+        ),
+        "directories",
+    )
+
+
+@subcommand(
+    "skills",
+    "List the bundled agent skills; --install links them into your agent harnesses",
+    arguments=arguments,
+)
 def cmd_skills(args: argparse.Namespace) -> dict | None:
     """List the bundled agent skills, or install them into the user's agent harnesses.
 

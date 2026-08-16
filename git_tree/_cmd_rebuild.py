@@ -20,6 +20,8 @@ from git_tree._git import (
 from git_tree._graph import discover
 from git_tree._guards import _remove_blocking_dirt
 from git_tree._prompt import _proceed, _require_input, _select_one
+from git_tree._registry import subcommand
+from git_tree._render import _set_completer
 
 if TYPE_CHECKING:
     import argparse
@@ -44,6 +46,22 @@ def _prunable_worktree_path(branch: str) -> Path | None:
     return None
 
 
+def arguments(p: argparse.ArgumentParser) -> None:
+    _set_completer(
+        p.add_argument("branch", nargs="?", help="Branch to rebuild (default: pick via fzf)"),
+        "git_heads",
+    )
+    p.add_argument(
+        "--force", action="store_true", help="Proceed even if worktree has uncommitted changes"
+    )
+    p.add_argument("-y", "--yes", action="store_true", help="Skip the confirmation prompt")
+
+
+@subcommand(
+    "rebuild",
+    "Rebuild a corrupted worktree from the branch tip (keeps branch ref and tree config)",
+    arguments=arguments,
+)
 def cmd_rebuild(args: argparse.Namespace) -> None:
     """Rebuild a corrupted worktree from the branch tip, preserving branch ref and tree config."""
     graph = discover()

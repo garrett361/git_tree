@@ -8,11 +8,13 @@ from typing import TYPE_CHECKING
 from git_tree._errors import TreeError
 from git_tree._git import _use_color, current_branch, git, git_ok
 from git_tree._graph import discover, root_of
+from git_tree._registry import subcommand
 
 if TYPE_CHECKING:
     import argparse
 
 
+@subcommand("log", "Show git log graph for all tree-branches")
 def cmd_log(args: argparse.Namespace) -> None:
     graph = discover()
     try:

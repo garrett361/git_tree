@@ -13,11 +13,25 @@ from git_tree._git import (
     git_ok,
 )
 from git_tree._prompt import _require_input, _select_one
+from git_tree._registry import subcommand
+from git_tree._render import _set_completer
 
 if TYPE_CHECKING:
     import argparse
 
 
+def arguments(p: argparse.ArgumentParser) -> None:
+    _set_completer(
+        p.add_argument("parent", nargs="?", help="Parent branch (fzf if omitted)"),
+        "git_heads",
+    )
+
+
+@subcommand(
+    "attach",
+    "Attach current branch to tree",
+    arguments=arguments,
+)
 def cmd_attach(args: argparse.Namespace) -> None:
     branch = current_branch()
     parent: str | None = args.parent

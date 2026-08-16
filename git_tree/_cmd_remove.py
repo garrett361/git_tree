@@ -16,11 +16,32 @@ from git_tree._git import (
 from git_tree._graph import discover
 from git_tree._guards import _remove_blocking_dirt
 from git_tree._prompt import _proceed, _require_input, _select_one
+from git_tree._registry import subcommand
+from git_tree._render import _set_completer
 
 if TYPE_CHECKING:
     import argparse
 
 
+def arguments(p: argparse.ArgumentParser) -> None:
+    _set_completer(
+        p.add_argument("branch", nargs="?", help="Branch to remove (default: pick via fzf)"),
+        "git_heads",
+    )
+    p.add_argument("--dry-run", action="store_true", help="Show what would be done")
+    p.add_argument("-y", "--yes", action="store_true", help="Skip the confirmation prompt")
+    p.add_argument(
+        "--force",
+        action="store_true",
+        help="Remove even if a worktree or its submodules have uncommitted changes",
+    )
+
+
+@subcommand(
+    "remove",
+    "Remove a subtree's worktrees and unregister its branches (keeps refs)",
+    arguments=arguments,
+)
 def cmd_remove(args: argparse.Namespace) -> None:
     """Tear down a subtree's worktrees and unregister its branches from the tree.
 
