@@ -42,9 +42,11 @@ RANK = {
 # `_guards._refuse_unfinished_replay`. Both sit at L3, and the edge runs one way only.
 SAME_RANK_ALLOWED = {("_engine", "_guards")}
 
-# `__init__.py` is empty and `__main__.py` is a two-line shim whose whole job is to call
-# `cli:main`, so it is the single legitimate importer of `cli`. Neither carries code that could
-# belong to a layer, and checking `__main__` would only ever report that shim.
+# `__init__.py` holds nothing but the side-effect imports that run the `@subcommand` decorators,
+# and `__main__.py` is a two-line shim whose whole job is to call `cli:main`, so it is the single
+# legitimate importer of `cli`. Neither carries code that could belong to a layer. Since that puts
+# `__init__.py` outside the rank checks, `test_package_init_imports_only_command_modules` below
+# covers its edges instead.
 NOT_LAYERED = {"__init__.py", "__main__.py"}
 
 
@@ -136,4 +138,76 @@ def test_no_command_module_imports_another_command_module() -> None:
         + "; ".join(violations)
         + ". A helper two commands share belongs in _guards or _engine, which is what keeps the "
         "command layer flat."
+    )
+
+
+def _command_module_names() -> set[str]:
+    """Subcommand names implied by the files on disk: `_cmd_remove.py` -> `remove`.
+
+    `tree` is excluded: `cmd_tree` is the parser's no-subcommand default
+    (`parser.set_defaults(func=cmd_tree)`), not a subcommand, so it is deliberately undecorated
+    and absent from `__init__.py`.
+    """
+    return {p.stem.removeprefix("_cmd_") for p in PACKAGE.glob("_cmd_*.py")} - {"tree"}
+
+
+def test_every_command_module_is_registered() -> None:
+    # Import the package and NOTHING else. Importing the `_cmd_*` modules here would run their
+    # decorators during the test, so registration would always succeed and the failure this
+    # exists to catch -- a command module missing from `__init__.py`, which is now the only thing
+    # tying it into the program -- would be masked.
+    import git_tree
+    from git_tree._registry import COMMANDS
+
+    assert git_tree  # the import above is the point; keep it from reading as unused
+    registered = {c.name for c in COMMANDS}
+    missing = sorted(_command_module_names() - registered)
+    # Subset, never equality: the registry holds 11 entries after `import git_tree` and 13 once
+    # anything in the session has imported `git_tree.cli`, which would make an exact assertion
+    # depend on test ordering.
+    assert not missing, (
+        f"command modules not registered: {missing}. Each needs a @subcommand decorator on its "
+        "handler and an import line in git_tree/__init__.py."
+    )
+
+
+def test_every_subparser_dispatches_to_its_own_handler() -> None:
+    # `-h` byte-identity cannot catch a mis-wired handler: a decorator naming the wrong command
+    # produces identical help text and identical completion scripts. Most commands are never
+    # dispatched through main() in the suite either, so assert the mapping directly.
+    import argparse
+    from importlib import import_module
+
+    from git_tree._cmd_tree import cmd_tree
+    from git_tree.cli import _build_parser
+
+    parser = _build_parser()
+    sub = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
+    wrong = []
+    for name in sorted(_command_module_names()):
+        want = getattr(import_module(f"git_tree._cmd_{name}"), f"cmd_{name}")
+        got = sub.choices[name].get_default("func")
+        if got is not want:
+            wrong.append(f"{name} -> {got!r}, expected {want!r}")
+    # These two must set no func of their own: main() dispatches them by name, before the
+    # args.func path, because they write non-envelope output and cmd_manpage takes the parser.
+    # `set_defaults` on the top-level parser does not propagate onto a subparser, so their own
+    # default is None; at parse time `args.func` still resolves to the top-level cmd_tree, which
+    # main() never consults for them.
+    for name in ("completions", "manpage"):
+        got = sub.choices[name].get_default("func")
+        if got is not None:
+            wrong.append(f"{name} -> {got!r}, expected no func of its own")
+    assert not wrong, "subparsers wired to the wrong handler: " + "; ".join(wrong)
+    assert parser.parse_args(["completions", "zsh"]).func is cmd_tree
+
+
+def test_package_init_imports_only_command_modules() -> None:
+    # `__init__.py` is in NOT_LAYERED, so the rank test never sees its edges. Harmless when it was
+    # empty; now that it holds imports, an `import git_tree.cli` there would be a real cycle.
+    imported = _imports(PACKAGE / "__init__.py")
+    expected = {f"_cmd_{n}" for n in _command_module_names()}
+    assert imported == expected, (
+        f"git_tree/__init__.py should import exactly the command modules. "
+        f"Missing: {sorted(expected - imported)}. Unexpected: {sorted(imported - expected)}."
     )

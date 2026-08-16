@@ -62,6 +62,8 @@ into a subdirectory silently breaks the bundled-skill lookup.
 | `_cmd_log.py` | 50 | `cmd_log` |
 
 `git_tree/skills/` (the data directory) does not move, and `git_tree/__init__.py` stays empty.
+**Superseded:** `__init__.py` later gained the imports that run each command's `@subcommand`
+decorator, and a 22nd module `_registry.py` joined L0. See AGENTS.md for the current layout.
 
 **Verify this table before writing code.** At the last check it covered all 144 top-level names
 in `cli.py` exactly once, but the file is under active development and the baseline has already

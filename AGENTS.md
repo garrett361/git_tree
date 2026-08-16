@@ -46,25 +46,29 @@ Fast inner loop: test files map 1:1 to commands (`test_rebase.py`, `test_push.py
 
 ## Adding a subcommand
 
-A command touches three sites:
+A command touches two sites:
 
-1. The `cmd_<name>(args)` handler, in its own `git_tree/_cmd_<name>.py` module.
-2. The import of that handler in `cli.py`, which is what lets the parser name it. This is a real
-   binding, not a re-export: `set_defaults` consumes it, so ruff will not prune it, and tests may
-   keep importing `cmd_<name>` from `git_tree.cli`.
-3. `sub.add_parser(...)` in `_build_parser()`, with `.set_defaults(func=cmd_<name>)`. The parser is the single source of truth: that one block wires dispatch (`main()` calls `args.func`), `-h`, the man page (`_render_manpage`), and both shell completions (`_render_completions`). If a value arg should complete branches or paths, tag it with `_set_completer(parser.add_argument(...), "git_heads"/"directories")`.
+1. The `cmd_<name>(args)` handler, in its own `git_tree/_cmd_<name>.py` module, carrying a
+   `@subcommand("<name>", "<help>", arguments=arguments)` decorator and, unless it takes no flags,
+   an `arguments(p)` function holding its `add_argument` calls.
+2. An `import git_tree._cmd_<name>` line in `git_tree/__init__.py`. Importing the module is what
+   runs the decorator, and the decorator is what puts it in `_registry.COMMANDS`, which
+   `_build_parser` loops over. Without that line the command silently does not exist;
+   `tests/test_repo_structure.py` is what catches it.
+
+The parser remains the single source of truth: those two edits wire dispatch (`main()` calls `args.func`), `-h`, the man page (`_render_manpage`), and both shell completions (`_render_completions`). If a value arg should complete branches or paths, tag it inside `arguments(p)` with `_set_completer(p.add_argument(...), "git_heads"/"directories")`.
 
 Commands that emit non-envelope output (`manpage`, `completions`) or have no JSON form (`log`) are special-cased in `main()` before the `args.func` dispatch; `manpage`/`completions` therefore set no `func` (and `cmd_manpage` takes the parser, so it could not be dispatched generically anyway). Completions are generated from the parser, so they cannot drift; `tests/test_agentic.py::TestCompletionGeneration` asserts the generated scripts complete the right tokens per subcommand and parse under the real shells.
 
 ## Architecture
 
-**Layout**: 21 flat modules under `git_tree/`, one per layer plus one per command, in an acyclic import graph. Entry point: `git_tree.cli:main` (registered as `git-tree` console script). `cli.py` holds only the CLI surface: the parser, `main`, the JSON envelope, and the two commands that cannot dispatch generically. A module may import only from a strictly lower rank:
+**Layout**: 22 flat modules under `git_tree/`, one per layer plus one per command, in an acyclic import graph. Entry point: `git_tree.cli:main` (registered as `git-tree` console script). `cli.py` holds only the CLI surface: the parser, `main`, the JSON envelope, and the two commands that cannot dispatch generically. A module may import only from a strictly lower rank:
 
-- **L0** `_errors` (error types, the `ErrorKind` tag vocabulary), `_render` (completion scripts + man page)
+- **L0** `_errors` (error types, the `ErrorKind` tag vocabulary), `_registry` (the `@subcommand` decorator and the `COMMANDS` list `_build_parser` reads), `_render` (completion scripts + man page)
 - **L1** `_git` (subprocess wrappers, config accessors, worktree/submodule/rebase state readers), `_prompt` (y/N confirm, fzf picker)
 - **L2** `_graph` (`BranchSnapshot`, `BranchInfo`, `Graph`, `discover`, root resolution)
 - **L3** `_display` (tree rendering, `_tree_json`), `_guards` (pre-flight gates), `_engine` (the cascade), `_cmd_skills`
-- **L4** the eleven `_cmd_<name>` modules, one per command, which never import each other
+- **L4** the eleven `_cmd_<name>` modules, one per command, which never import each other (`_cmd_skills` is the exception at L3)
 - **L5** `cli`
 
 `tests/test_repo_structure.py` enforces all of this by parsing each module with `ast`, failing with the offending `src -> dst` edge named, so the layering is a checked invariant rather than a convention. It walks `git_tree/*.py` rather than a fixed list, so a new module with no declared rank fails until you add one there and to the list above. Note it counts imports inside `if TYPE_CHECKING:` and inside function bodies: a deferred back-edge is still a back-edge.

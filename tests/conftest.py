@@ -33,6 +33,15 @@ def cli_args(**overrides: object) -> argparse.Namespace:
     for action in actions:
         if action.dest == "help" or action.default is argparse.SUPPRESS:
             continue
+        # Several dests are shared across subcommands (`branch`, `--yes`, `--force`, ...). Taking
+        # the first would silently depend on subcommand listing order, so require agreement
+        # instead: this namespace has one value per dest and cannot represent a disagreement.
+        if action.dest in defaults and defaults[action.dest] != action.default:
+            raise AssertionError(
+                f"`{action.dest}` has conflicting defaults across subcommands "
+                f"({defaults[action.dest]!r} vs {action.default!r}); cli_args cannot represent "
+                "both. Give the flag one default, or build that subcommand's namespace by hand."
+            )
         defaults.setdefault(action.dest, action.default)
     return argparse.Namespace(**{**defaults, **overrides})
 
