@@ -46,17 +46,23 @@ Fast inner loop: test files map 1:1 to commands (`test_rebase.py`, `test_push.py
 
 ## Adding a subcommand
 
-A command touches two sites:
+A command touches three sites:
 
 1. The `cmd_<name>(args)` handler, in its own `git_tree/_cmd_<name>.py` module, carrying a
    `@subcommand("<name>", "<help>", arguments=arguments)` decorator and, unless it takes no flags,
    an `arguments(p)` function holding its `add_argument` calls.
 2. An `import git_tree._cmd_<name>` line in `git_tree/__init__.py`. Importing the module is what
    runs the decorator, and the decorator is what puts it in `_registry.COMMANDS`, which
-   `_build_parser` loops over. Without that line the command silently does not exist;
-   `tests/test_repo_structure.py` is what catches it.
+   `_build_parser` loops over. Without that line the command silently does not exist.
+3. A `RANK` entry (4, unless it needs importing by another layer) in
+   `tests/test_repo_structure.py`, plus the layer list below.
 
-The parser remains the single source of truth: those two edits wire dispatch (`main()` calls `args.func`), `-h`, the man page (`_render_manpage`), and both shell completions (`_render_completions`). If a value arg should complete branches or paths, tag it inside `arguments(p)` with `_set_completer(p.add_argument(...), "git_heads"/"directories")`.
+Only the first is easy to get wrong quietly. Sites 2 and 3 fail loudly: an unranked module fails
+`test_every_module_has_a_declared_rank`, and a module missing from `__init__.py` fails
+`test_every_command_module_is_registered`, which deliberately imports only `git_tree` so the
+decorator cannot run during the test and mask the omission.
+
+The parser remains the single source of truth: those edits wire dispatch (`main()` calls `args.func`), `-h`, the man page (`_render_manpage`), and both shell completions (`_render_completions`). If a value arg should complete branches or paths, tag it inside `arguments(p)` with `_set_completer(p.add_argument(...), "git_heads"/"directories")`.
 
 Commands that emit non-envelope output (`manpage`, `completions`) or have no JSON form (`log`) are special-cased in `main()` before the `args.func` dispatch; `manpage`/`completions` therefore set no `func` (and `cmd_manpage` takes the parser, so it could not be dispatched generically anyway). Completions are generated from the parser, so they cannot drift; `tests/test_agentic.py::TestCompletionGeneration` asserts the generated scripts complete the right tokens per subcommand and parse under the real shells.
 
