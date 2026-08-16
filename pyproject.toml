@@ -41,6 +41,8 @@ known-first-party = ["git_tree"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["TCH"]
+# The command-module imports there exist to run their @subcommand decorators, not to re-export.
+"git_tree/__init__.py" = ["F401"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
