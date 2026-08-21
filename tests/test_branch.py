@@ -125,3 +125,53 @@ class TestBranchExisting:
         # branch make %(refname:short) ambiguous, a separate git quirk.)
         assert repo.git("rev-parse", "refs/heads/v1") == repo.git("rev-parse", "main")
         assert repo.git("config", "branch.v1.tree-parent-branch") == "main"
+
+
+class TestBranchParentFlag:
+    def test_parent_flag_overrides_current_branch(self, repo: RepoHelper, tmp_path) -> None:
+        # On main; `other` has its own worktree and a commit main doesn't have, so forking
+        # from the wrong base (cwd's HEAD) is distinguishable from forking from `--parent`.
+        repo.branch("other", parent="main")
+        wt_other = repo.worktree("other")
+        (wt_other / "o.txt").write_text("o")
+        repo.git("add", "o.txt", cwd=wt_other)
+        repo.git("commit", "-m", "diverge on other", cwd=wt_other)
+
+        cmd_branch(_ns(name="child", path=str(tmp_path / "wt-child"), parent="other"))
+        graph = discover()
+        assert graph.parent_of["child"] == "other"
+        assert repo.git("rev-parse", "child") == repo.git("rev-parse", "other")
+
+    def test_parent_flag_nonexistent_branch_raises(
+        self, repo: RepoHelper, capsys, tmp_path
+    ) -> None:
+        target = tmp_path / "wt-child"
+        with pytest.raises(TreeError):
+            cmd_branch(_ns(name="child", path=str(target), parent="nope"))
+        assert "No such branch" in capsys.readouterr().err
+        assert "child" not in discover().parent_of
+        assert not target.exists()
+
+    def test_parent_flag_branch_without_worktree_raises(
+        self, repo: RepoHelper, capsys, tmp_path
+    ) -> None:
+        repo.git("branch", "no-wt")  # exists, but never given a worktree
+        target = tmp_path / "wt-child"
+        with pytest.raises(TreeError):
+            cmd_branch(_ns(name="child", path=str(target), parent="no-wt"))
+        assert "worktree" in capsys.readouterr().err
+        assert "child" not in discover().parent_of
+        assert not target.exists()
+
+    def test_parent_flag_root_branch_with_worktree_succeeds(
+        self, repo: RepoHelper, tmp_path, monkeypatch
+    ) -> None:
+        # Run from a non-main worktree, forking from main: proves the worktree lookup for a
+        # root branch (no BranchInfo, only graph.worktree_of) works through --parent too.
+        repo.branch("other", parent="main")
+        wt_other = repo.worktree("other")
+        monkeypatch.chdir(wt_other)
+
+        cmd_branch(_ns(name="child", path=str(tmp_path / "wt-child"), parent="main"))
+        assert discover().parent_of["child"] == "main"
+        assert repo.git("rev-parse", "child") == repo.git("rev-parse", "main")

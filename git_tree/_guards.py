@@ -92,7 +92,7 @@ def _refuse_unfinished_replay(
 
 
 def _require_worktrees(branches: list[str], graph: Graph) -> None:
-    missing = [b for b in branches if not (graph.branches.get(b) and graph.branches[b].worktree)]
+    missing = [b for b in branches if not graph.worktree_of.get(b)]
     if not missing:
         return
     lines = ["These branches need worktrees before this operation can proceed:"]
