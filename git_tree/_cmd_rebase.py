@@ -49,6 +49,11 @@ def arguments(p: argparse.ArgumentParser) -> None:
     )
     p.add_argument("--dry-run", action="store_true", help="Show what would be done")
     p.add_argument("--no-auto-rerere", action="store_true", help="Disable auto-continue via rerere")
+    p.add_argument(
+        "--no-descendants",
+        action="store_true",
+        help="Rebase only branch, without cascading to its descendants",
+    )
     p.add_argument("-y", "--yes", action="store_true", help="Skip the confirmation prompt")
 
 
@@ -84,6 +89,8 @@ def cmd_rebase(args: argparse.Namespace) -> None:
     target: str = args.target
     graph = discover()
     resume_cmd = _resume_cmd(branch)
+    if args.no_descendants:
+        resume_cmd = [*resume_cmd, "--no-descendants"]
 
     old_parent = graph.parent_of.get(branch) or _get_tree_parent(branch)
     if not old_parent:
@@ -161,7 +168,7 @@ def cmd_rebase(args: argparse.Namespace) -> None:
 
     _require_healthy_submodules([branch], graph)
     _require_clean_state([branch], graph, resume_cmd)
-    if descendants:
+    if descendants and not args.no_descendants:
         _require_ready(descendants, graph, resume_cmd)
 
     print(f"Rebasing onto {target}:")
@@ -169,7 +176,10 @@ def cmd_rebase(args: argparse.Namespace) -> None:
 
     if descendants:
         print()
-        print("Will propagate to:")
+        if args.no_descendants:
+            print("Will NOT propagate to (--no-descendants):")
+        else:
+            print("Will propagate to:")
         for line in _subtree_lines(graph, branch):
             print(f"  {line}")
 
@@ -204,7 +214,7 @@ def cmd_rebase(args: argparse.Namespace) -> None:
         )
     print(f"Rebased {branch} onto {target}")
 
-    if descendants:
+    if descendants and not args.no_descendants:
         print()
         print("Cascading to descendants...")
         _propagate_descendants(branch, graph, auto_rerere=auto_rerere, resume_cmd=resume_cmd)

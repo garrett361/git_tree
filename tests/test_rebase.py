@@ -12,9 +12,17 @@ from git_tree._graph import _root_remote, discover
 from .conftest import RepoHelper, cli_args
 
 
-def _ns(target: str, yes: bool = False, branch: str | None = None) -> object:
+def _ns(
+    target: str, yes: bool = False, branch: str | None = None, no_descendants: bool = False
+) -> object:
     return cli_args(
-        command="rebase", target=target, branch=branch, dry_run=False, no_auto_rerere=False, yes=yes
+        command="rebase",
+        target=target,
+        branch=branch,
+        dry_run=False,
+        no_auto_rerere=False,
+        no_descendants=no_descendants,
+        yes=yes,
     )
 
 
@@ -187,6 +195,58 @@ class TestRebase:
         dev2_log = repo.git("log", "--oneline", "dev2")
         assert "new main commit" not in dev2_log  # sibling not propagated
         assert "dev2 commit" in dev2_log
+
+    def test_no_descendants_skips_cascade(self, repo: RepoHelper, monkeypatch, tmp_path) -> None:
+        """--no-descendants rebases the named branch onto the new target but leaves its own
+        descendants untouched, unlike a plain rebase which auto-cascades to them."""
+        repo.branch("dev1", parent="main")
+        wt1 = repo.worktree("dev1", str(tmp_path / "wt-dev1"))
+        (wt1 / "d1.txt").write_text("d1")
+        repo.git("add", "d1.txt", cwd=wt1)
+        repo.git("commit", "-m", "dev1 commit", cwd=wt1)
+
+        repo.branch("grandchild", parent="dev1")
+        wt_g = repo.worktree("grandchild", str(tmp_path / "wt-grandchild"))
+        (wt_g / "g1.txt").write_text("g1")
+        repo.git("add", "g1.txt", cwd=wt_g)
+        repo.git("commit", "-m", "grandchild commit", cwd=wt_g)
+
+        repo.checkout("main")
+        repo.commit("m2.txt", "m2", "new main commit")
+
+        monkeypatch.chdir(wt1)
+        monkeypatch.setattr("builtins.input", lambda _: "y")
+        cmd_rebase(_ns(target="main", no_descendants=True))
+
+        dev1_log = repo.git("log", "--oneline", "dev1")
+        assert "new main commit" in dev1_log
+        assert "dev1 commit" in dev1_log
+
+        grandchild_log = repo.git("log", "--oneline", "grandchild")
+        assert "new main commit" not in grandchild_log  # descendant left stale
+        assert "grandchild commit" in grandchild_log
+
+    def test_no_descendants_conflict_remedy_carries_flag(
+        self, repo: RepoHelper, monkeypatch, tmp_path
+    ) -> None:
+        """A conflict while rebasing the named branch itself (not a descendant) must resume with
+        the same --no-descendants scope, or resuming would silently cascade after all."""
+        repo.commit("shared.txt", "original", "base")
+        repo.branch("dev1", parent="main")
+        wt1 = repo.worktree("dev1", str(tmp_path / "wt-dev1"))
+        (wt1 / "shared.txt").write_text("dev1 version")
+        repo.git("add", "shared.txt", cwd=wt1)
+        repo.git("commit", "-m", "dev1 modifies shared", cwd=wt1)
+
+        repo.checkout("main")
+        repo.commit("shared.txt", "main version", "main modifies shared")
+
+        monkeypatch.chdir(wt1)
+        monkeypatch.setattr("builtins.input", lambda _: "y")
+        with pytest.raises(SystemExit) as exc:
+            cmd_rebase(_ns(target="main", no_descendants=True))
+
+        assert exc.value.remedy == ["git", "tree", "propagate", "dev1", "--no-descendants"]
 
     def test_rebase_diverged_parent_preserves_commits(
         self, repo: RepoHelper, monkeypatch, tmp_path

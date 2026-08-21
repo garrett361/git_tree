@@ -30,6 +30,11 @@ def arguments(p: argparse.ArgumentParser) -> None:
     )
     p.add_argument("--dry-run", action="store_true", help="Show what would be done")
     p.add_argument("--no-auto-rerere", action="store_true", help="Disable auto-continue via rerere")
+    p.add_argument(
+        "--no-descendants",
+        action="store_true",
+        help="Finish branch's own interrupted rebase without cascading to its descendants",
+    )
     p.add_argument("-y", "--yes", action="store_true", help="Skip the confirmation prompt")
 
 
@@ -44,6 +49,8 @@ def cmd_propagate(args: argparse.Namespace) -> None:
 
     descendants = graph.downstream_from(branch)
     resume_cmd = _resume_cmd(branch)
+    if args.no_descendants:
+        resume_cmd = [*resume_cmd, "--no-descendants"]
 
     # `propagate` is also the universal resume: if a conflict stopped an earlier cascade, the
     # user resolves + `git add` and re-runs this command, which finishes the interrupted rebase
@@ -55,19 +62,30 @@ def cmd_propagate(args: argparse.Namespace) -> None:
         (di := graph.branches.get(d)) and di.worktree and _has_active_rebase(di.worktree)
         for d in descendants
     )
-    is_resume = named_mid or descendant_mid
+    # --no-descendants never touches descendants, so an unrelated descendant's own mid-rebase
+    # state should not affect this call's resume/confirmation behavior.
+    is_resume = named_mid if args.no_descendants else (named_mid or descendant_mid)
 
+    if args.no_descendants:
+        # A leaf left mid-rebase by `git tree rebase` still needs finishing; anything else about
+        # descendants is out of scope for this call.
+        if not named_mid:
+            print(f"{branch} is not mid-rebase; nothing to finish.")
+            return
     # A leaf left mid-rebase by `git tree rebase` still needs finishing, so don't take the
-    # no-descendants shortcut when `branch` itself is the stuck one.
-    if not descendants and not named_mid:
+    # empty-subtree shortcut when `branch` itself is the stuck one.
+    elif not descendants and not named_mid:
         print("No descendants to propagate to.")
         return
-
-    _require_ready(descendants, graph, resume_cmd)
+    else:
+        _require_ready(descendants, graph, resume_cmd)
 
     print(f"Propagating from {branch}:")
-    for line in _subtree_lines(graph, branch, show_counts=True):
-        print(line)
+    if args.no_descendants:
+        print("  (descendants skipped: --no-descendants)")
+    else:
+        for line in _subtree_lines(graph, branch, show_counts=True):
+            print(line)
     print()
 
     if args.dry_run:
@@ -97,4 +115,5 @@ def cmd_propagate(args: argparse.Namespace) -> None:
             resume_cmd=resume_cmd,
         )
         graph = discover()  # branch's tip/fork moved; re-read before cascading
-    _propagate_descendants(branch, graph, auto_rerere=auto_rerere, resume_cmd=resume_cmd)
+    if not args.no_descendants:
+        _propagate_descendants(branch, graph, auto_rerere=auto_rerere, resume_cmd=resume_cmd)

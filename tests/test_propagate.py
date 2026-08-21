@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from git_tree._cmd_propagate import cmd_propagate
+from git_tree._cmd_rebase import cmd_rebase
 from git_tree._errors import TreeError
 from git_tree._git import _has_active_rebase
 from git_tree._graph import discover
@@ -21,8 +22,15 @@ def _ns(
     no_auto_rerere: bool = False,
     branch: str | None = None,
     yes: bool = False,
+    no_descendants: bool = False,
 ) -> object:
-    return cli_args(dry_run=dry_run, no_auto_rerere=no_auto_rerere, branch=branch, yes=yes)
+    return cli_args(
+        dry_run=dry_run,
+        no_auto_rerere=no_auto_rerere,
+        branch=branch,
+        yes=yes,
+        no_descendants=no_descendants,
+    )
 
 
 def _no_confirm(_message: str) -> bool:
@@ -1005,3 +1013,53 @@ class TestPropagateResumeGuards:
 
         assert exc.value.code == 4
         assert "not onto main" not in exc.value.message
+
+
+class TestPropagateNoDescendants:
+    def test_finishes_named_branch_only(self, repo: RepoHelper, monkeypatch, tmp_path) -> None:
+        """Resuming a --no-descendants rebase conflict finishes the named branch's own rebase
+        (fork-commit included) but does not cascade into its descendants."""
+        repo.commit("shared.txt", "original", "base")
+        repo.branch("dev1", parent="main")
+        wt1 = repo.worktree("dev1", str(tmp_path / "wt-dev1"))
+        (wt1 / "shared.txt").write_text("dev1 version")
+        repo.git("add", "shared.txt", cwd=wt1)
+        repo.git("commit", "-m", "dev1 modifies shared", cwd=wt1)
+
+        repo.branch("grandchild", parent="dev1")
+        wt_g = repo.worktree("grandchild", str(tmp_path / "wt-grandchild"))
+        (wt_g / "g1.txt").write_text("g1")
+        repo.git("add", "g1.txt", cwd=wt_g)
+        repo.git("commit", "-m", "grandchild commit", cwd=wt_g)
+
+        repo.checkout("main")
+        repo.commit("shared.txt", "main version", "main modifies shared")
+
+        monkeypatch.chdir(wt1)
+        monkeypatch.setattr("builtins.input", lambda _: "y")
+        with pytest.raises(SystemExit):
+            cmd_rebase(cli_args(command="rebase", target="main", yes=True, no_descendants=True))
+
+        (wt1 / "shared.txt").write_text("resolved")
+        repo.git("add", "shared.txt", cwd=wt1)
+        cmd_propagate(_ns(branch="dev1", no_descendants=True))
+
+        dev1_log = repo.git("log", "--oneline", "dev1")
+        assert "main modifies shared" in dev1_log
+        assert repo.git("config", "branch.dev1.tree-fork-commit") == repo.git("rev-parse", "main")
+
+        grandchild_log = repo.git("log", "--oneline", "grandchild")
+        assert "main modifies shared" not in grandchild_log  # descendant left stale
+
+    def test_noop_when_not_mid_rebase(
+        self, repo: RepoHelper, monkeypatch, capsys, tmp_path
+    ) -> None:
+        repo.branch("dev1", parent="main")
+        repo.worktree("dev1", str(tmp_path / "wt-dev1"))
+        dev1_before = repo.git("rev-parse", "dev1")
+
+        cmd_propagate(_ns(branch="dev1", no_descendants=True))
+
+        out = capsys.readouterr().out
+        assert "not mid-rebase" in out
+        assert repo.git("rev-parse", "dev1") == dev1_before

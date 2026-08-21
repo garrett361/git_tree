@@ -27,6 +27,8 @@ git tree propagate <branch> -y
 ```
 
 Use `--dry-run` first if the user wants a preview. Do not pass `--no-auto-rerere` unless asked.
+If the user wants to update only `<branch>` itself without cascading into its descendants, add
+`--no-descendants` (same flag on `git tree rebase`). Leave it off by default.
 
 Exit 0 finished the cascade. Exit 3 stopped on a conflict.
 
@@ -47,7 +49,8 @@ under `--json` as `error.branch`, `error.worktree`, `error.conflicted_files`, `e
    again. The user decides once.
 5. Only after explicit approval, write the file and `git add` it in that worktree.
 
-With every conflicted file resolved and staged, run the `remedy` exactly as given:
+With every conflicted file resolved and staged, run the `remedy` exactly as given (if the
+original call passed `--no-descendants`, the remedy carries it too, so do not drop it):
 
 ```sh
 git tree propagate <branch>

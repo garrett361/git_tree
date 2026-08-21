@@ -83,7 +83,8 @@ git tree --version                     # print git-tree <version>
 > - **`remove`**: deletes worktrees and unregisters the entire subtree (branch refs are kept).
 > - **`split --child`**: re-points the current branch's existing child branches onto the new branch.
 >
-> `propagate`/`rebase`/`push`/`remove` support `--dry-run` to preview first.
+> `propagate`/`rebase`/`push`/`remove` support `--dry-run` to preview first. Pass
+> `--no-descendants` to `propagate`/`rebase` to act on the named branch only, without cascading.
 
 Interactive commands (`split`, and the confirmation-gated `propagate`/`rebase`/`push`/`remove`/`rebuild`/`detach`) take flags to run without prompting: `-y`/`--yes` skips a confirmation, and `--dry-run` previews `propagate`/`rebase`/`push`/`remove` first. `remove` and `rebuild` take `--force` to act despite anything they would otherwise refuse to destroy: uncommitted changes (in the worktree or a submodule), a rebase left in progress, or a worktree too broken to inspect. Each refusal names what it found, and `--force` destroys exactly that. See `git tree <cmd> -h` for each command's flags.
 
