@@ -57,7 +57,11 @@ Once the plan is approved:
 ## Rules
 
 - **Never implement the plan after the handoff.** The fresh agent does that, in its own
-  session, with its own clean context.
+  session, with its own clean context. This holds even when the user's own phrasing right
+  after approving the plan sounds like it's authorizing you to continue — "let's start",
+  "get to implementing", "let's go". Read that as "kick off the handoff", not "implement it
+  yourself": the whole point of this skill is that the *fresh* agent implements. If it's
+  genuinely ambiguous which one they mean, ask before writing any code.
 - **Do not assume the parent worktree is clean.** A submodule mid-rebase, an unrelated dirty
   index, or other unfamiliar state should be investigated and flagged to the user, not
   silently worked around, unless the user explicitly authorizes a specific resolution.
