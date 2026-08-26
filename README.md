@@ -246,3 +246,4 @@ git-tree can be driven by an AI agent or any script. Pass `--json` in any positi
 
 
 # throwaway: stack-prs e2e test A
+# throwaway: stack-prs e2e test B
