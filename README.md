@@ -244,3 +244,5 @@ uv run ty check git_tree/
 
 git-tree can be driven by an AI agent or any script. Pass `--json` in any position (`git tree --json <cmd>` or `git tree <cmd> --json`) to get **exactly one JSON object** on stdout, with every diagnostic on stderr; it also implies `--no-input`, so it never prompts. The full contract (the envelope shape, `error.kind` values, exit codes, and the `git tree --json` forest query) is documented for agents in [AGENTS.md](AGENTS.md).
 
+
+# throwaway: stack-prs e2e test A
