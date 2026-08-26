@@ -11,7 +11,13 @@ import pytest
 from git_tree._cmd_skills import _bundled_skills
 from git_tree.cli import _build_parser, main
 
-SKILL_NAMES = {"git-tree-land", "git-tree-doctor", "git-tree-propagate", "git-tree-plan"}
+SKILL_NAMES = {
+    "git-tree-land",
+    "git-tree-doctor",
+    "git-tree-propagate",
+    "git-tree-plan",
+    "git-tree-plan-impl",
+}
 
 
 def _foreign_skill(path: Path) -> None:
