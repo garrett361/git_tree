@@ -10,6 +10,7 @@ from git_tree._errors import TreeError
 from git_tree._git import (
     _carry_remote_to_root,
     _get_tree_parent,
+    _init_submodules_or_warn,
     _pending_sequencer_op,
     _register_child,
     _set_fork_commit,
@@ -22,6 +23,7 @@ from git_tree._git import (
     git_ok,
 )
 from git_tree._graph import _get_fork_commit
+from git_tree._guards import _require_initialized_submodules
 from git_tree._prompt import _proceed, _prompt, _require_input, _select_one
 from git_tree._registry import subcommand
 from git_tree._render import _set_completer
@@ -60,17 +62,23 @@ def _worktree_choice(args: argparse.Namespace, name: str) -> str:
     return "" if reply.lower() == "n" else reply
 
 
-def _add_split_worktree(worktree_path: str, name: str) -> None:
+def _add_split_worktree(worktree_path: str, name: str, *, init_submodules: bool = True) -> None:
     """Create `name`'s worktree at `worktree_path`, warning (not failing) if it can't be made.
 
     The split's branch and config writes are already applied by the time this runs, so a
     worktree-add failure must not abort and leave the user unsure whether the split happened.
     No-op when `worktree_path` is empty (the user declined a worktree).
+
+    `git worktree add` leaves submodules unpopulated, and a later `git tree split --child` run
+    from here would `reset --hard` into them, so initialize as `branch` does. A failed init only
+    warns, for the same reason a failed worktree-add does.
     """
     if not worktree_path:
         return
     if git_echo_ok("worktree", "add", worktree_path, name):
         print(f"Created worktree at {worktree_path}")
+        if init_submodules:
+            _init_submodules_or_warn(worktree_path)
     else:
         print(
             f"Warning: could not create worktree at {worktree_path} "
@@ -88,6 +96,12 @@ def _split_child(
     `commit_hash`; the new branch is created at the old tip first so no commit is lost, and
     `branch`'s existing tree-children re-point onto it (forks left as-is — the new branch
     inherits the old tip's full history). `branch`'s own parent/fork are untouched."""
+    # Before anything, including the name prompt: a submodule that the split commit records but
+    # this worktree cannot open makes the rewind below fail partway. This also has to precede the
+    # `git status` read, which itself dies on a corrupted submodule.
+    top = Path(git("rev-parse", "--show-toplevel"))
+    _require_initialized_submodules(top, commit_hash, branch)
+
     new_name = args.name
     if not new_name:
         _require_input(args, "new branch name", "--name")
@@ -96,7 +110,6 @@ def _split_child(
         raise SystemExit(1)
 
     # The rewind resets the worktree, so refuse tracked changes (untracked survive it).
-    top = Path(git("rev-parse", "--show-toplevel"))
     st = _worktree_status(top)
     if st.staged or st.modified or st.conflicted:
         raise TreeError(
@@ -141,9 +154,16 @@ def _split_child(
     if not git_echo_ok("branch", new_name, old_head):
         raise TreeError(f"Could not create branch '{new_name}' (see output above).")
     if not git_echo_ok("reset", "--hard", commit_hash):
+        # A reset can die partway (a submodule it recursed into, say) with the index and working
+        # tree already partly rewritten, so name that too: the leftover branch is the obvious
+        # residue but the half-applied rewind is the one that confuses. The undo disables
+        # submodule recursion, since recursion is the likeliest reason the reset just failed and
+        # an undo that re-trips it is no undo at all.
         raise TreeError(
-            f"Failed to rewind {branch} to {commit_hash} (see output above); "
-            f"'{new_name}' was created at the old tip."
+            f"Failed to rewind {branch} to {commit_hash} (see output above). '{new_name}' was "
+            f"created at the old tip, and the reset may have partially applied. To undo both:\n"
+            f"  git -C {top} reset --hard --no-recurse-submodules {old_head}\n"
+            f"  git -C {top} branch -D {new_name}"
         )
 
     # New child hangs off `branch` (now at the split); `branch` keeps its own parent/fork.
@@ -155,7 +175,7 @@ def _split_child(
         git("config", f"branch.{c}.tree-parent-branch", new_name)
 
     worktree_path = _worktree_choice(args, new_name)
-    _add_split_worktree(worktree_path, new_name)
+    _add_split_worktree(worktree_path, new_name, init_submodules=not args.no_submodule_init)
 
     kept_range = f"{old_fork}..{commit_hash}" if old_fork is not None else commit_hash
     kept = git_lines("log", "--oneline", kept_range)
@@ -187,6 +207,11 @@ def arguments(p: argparse.ArgumentParser) -> None:
     )
     wt.add_argument(
         "--no-worktree", action="store_true", help="Don't create a worktree for the new branch"
+    )
+    p.add_argument(
+        "--no-submodule-init",
+        action="store_true",
+        help="Skip automatic `git submodule update --init --recursive` after creating the worktree",
     )
     p.add_argument(
         "-y", "--yes", action="store_true", help="Skip the --child rewind confirmation prompt"
@@ -260,7 +285,7 @@ def cmd_split(args: argparse.Namespace) -> None:
         # fork — it is now the new root's child, recorded above.
         _carry_remote_to_root(branch, parent_name)
 
-    _add_split_worktree(worktree_path, parent_name)
+    _add_split_worktree(worktree_path, parent_name, init_submodules=not args.no_submodule_init)
 
     split_range = f"{old_fork}..{commit_hash}" if old_fork is not None else commit_hash
     split_commits = git_lines("log", "--oneline", split_range)

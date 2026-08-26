@@ -226,7 +226,9 @@ All branches in the tree must have linked worktrees. Operations that touch multi
 
 ## Submodules
 
-`git tree branch` automatically runs `git submodule update --init --recursive` after creating the worktree (skip with `--no-submodule-init`). `propagate` and `rebase` check submodule health before starting: if a worktree's submodule `.git` state is corrupted, they abort with a message pointing to `git tree rebuild`.
+`git tree branch` and `git tree split` automatically run `git submodule update --init --recursive` after creating a worktree (skip with `--no-submodule-init`); `rebuild` always does, since repairing submodule state is its purpose. This matters because `git worktree add` itself never populates submodules, so a worktree left uninitialized is one that a later `reset --hard` can fail partway through.
+
+`propagate` and `rebase` check submodule health before starting: if a worktree's submodule `.git` state is corrupted, they abort with a message pointing to `git tree rebuild`. `split --child` additionally refuses when the worktree it is about to rewind has an *uninitialized* submodule and `submodule.recurse` is set, since that combination makes `git reset --hard` recurse into it and abort with the index and working tree already partly rewritten; the refusal names the `git submodule update` to run. With `submodule.recurse` unset the rewind succeeds and merely leaves submodules stale, which git-tree does not block.
 
 ## Development
 

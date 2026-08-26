@@ -140,6 +140,34 @@ def _worktree_status(
     return WorktreeStatus(staged, modified, untracked, conflicted, dirty=bool(out))
 
 
+def _config_bool(key: str, *, cwd: Path | str | None = None) -> bool:
+    """Value of a boolean git config key; False when unset. `--type=bool` normalizes git's
+    several spellings of true (`yes`, `on`, `1`, a bare key) to the literal "true"."""
+    return git("config", "--type=bool", "--get", key, cwd=cwd, check=False) == "true"
+
+
+def _gitlink_paths(commit: str, *, cwd: Path | str | None = None) -> list[str]:
+    """Submodule paths recorded as gitlinks in `commit`'s tree.
+
+    Read from the commit rather than from the worktree's `.gitmodules`, because what a
+    `reset --hard` to it recurses into is what the *target* records: a submodule the target
+    adds is absent from the current worktree entirely, and one the target drops needs no
+    recursion at all (git removes the directory and exits 0). An unchanged gitlink still
+    counts, so this is the whole set, not just the ones the reset would change.
+    """
+    raw = git("ls-tree", "-r", "-z", "--full-tree", commit, cwd=cwd)
+    paths = []
+    for entry in raw.split("\0"):
+        if not entry:
+            continue
+        # `<mode> SP <type> SP <object> TAB <path>`; -z leaves the path unquoted, and splitting
+        # on the tab keeps paths containing spaces intact.
+        meta, _, path = entry.partition("\t")
+        if path and meta.split()[1] == "commit":
+            paths.append(path)
+    return paths
+
+
 def _set_fork_commit(branch: str, commit: str) -> None:
     git("config", f"branch.{branch}.tree-fork-commit", commit)
 

@@ -12,6 +12,7 @@ from git_tree._cmd_propagate import cmd_propagate
 from git_tree._cmd_rebase import cmd_rebase
 from git_tree._cmd_rebuild import cmd_rebuild
 from git_tree._cmd_remove import cmd_remove
+from git_tree._cmd_split import cmd_split
 from git_tree._errors import TreeError
 from git_tree._git import (
     _check_submodule_health,
@@ -241,6 +242,281 @@ class TestBranchSubmoduleInit:
 
         assert (Path(wt_path) / "mysub").exists()
         assert not (Path(wt_path) / "mysub" / "readme.txt").exists()
+
+
+class TestSplitSubmoduleInit:
+    """`split` creates a worktree just as `branch` does, so it owes the same init. Skipping it
+    was a real bug: `git worktree add` never populates submodules, and a chained split rewinds
+    inside the worktree the previous split just made."""
+
+    def _feature(self, repo: RepoHelper) -> tuple[str, str]:
+        """feature off main with commits f1,f2,f3, left checked out. Returns f1 and f2."""
+        repo.branch("feature", parent="main")
+        repo.checkout("feature")
+        c1 = repo.commit("f1.txt", "f1", "f1")
+        c2 = repo.commit("f2.txt", "f2", "f2")
+        repo.commit("f3.txt", "f3", "f3")
+        return c1, c2
+
+    def test_split_inits_submodules(self, repo: RepoHelper, tmp_path, monkeypatch, no_fzf) -> None:
+        allow_file_protocol(monkeypatch)
+        add_submodule(repo, "mysub", tmp_path)
+        c1, _c2 = self._feature(repo)
+
+        wt = tmp_path / "wt-earlier"
+        cmd_split(cli_args(command="split", yes=True, after=c1, name="earlier", worktree=str(wt)))
+
+        assert (wt / "mysub" / ".git").exists()
+        assert (wt / "mysub" / "readme.txt").exists()
+
+    def test_split_child_inits_submodules(
+        self, repo: RepoHelper, tmp_path, monkeypatch, no_fzf
+    ) -> None:
+        allow_file_protocol(monkeypatch)
+        add_submodule(repo, "mysub", tmp_path)
+        c1, _c2 = self._feature(repo)
+
+        wt = tmp_path / "wt-later"
+        cmd_split(
+            cli_args(
+                command="split", yes=True, child=True, after=c1, name="later", worktree=str(wt)
+            )
+        )
+
+        assert (wt / "mysub" / ".git").exists()
+        assert (wt / "mysub" / "readme.txt").exists()
+
+    def test_split_no_submodule_init_flag(
+        self, repo: RepoHelper, tmp_path, monkeypatch, no_fzf
+    ) -> None:
+        allow_file_protocol(monkeypatch)
+        add_submodule(repo, "mysub", tmp_path)
+        c1, _c2 = self._feature(repo)
+
+        wt = tmp_path / "wt-earlier"
+        cmd_split(
+            cli_args(
+                command="split",
+                yes=True,
+                after=c1,
+                name="earlier",
+                worktree=str(wt),
+                no_submodule_init=True,
+            )
+        )
+
+        # The split itself still happened, and the submodule directory still exists: what the
+        # flag suppresses is only its population, not the worktree or the split.
+        assert discover().parent_of["feature"] == "earlier"
+        assert (wt / "mysub").exists()
+        assert not (wt / "mysub" / ".git").exists()
+        assert not (wt / "mysub" / "readme.txt").exists()
+
+    def test_chained_split_survives_submodule_recurse(
+        self, repo: RepoHelper, tmp_path, monkeypatch, no_fzf
+    ) -> None:
+        """The original failure, end to end.
+
+        Split once to make a worktree, then split again from inside it. `submodule.recurse` makes
+        the second split's `reset --hard` recurse, which aborts on an unpopulated submodule after
+        the index and working tree are already partly rewritten. Repo-local config rather than the
+        environment, so it does not collide with `allow_file_protocol`'s GIT_CONFIG_COUNT.
+        """
+        allow_file_protocol(monkeypatch)
+        add_submodule(repo, "mysub", tmp_path)
+        repo.git("config", "submodule.recurse", "true")
+        c1, c2 = self._feature(repo)
+
+        wt = tmp_path / "wt-mid"
+        cmd_split(
+            cli_args(command="split", yes=True, child=True, after=c1, name="mid", worktree=str(wt))
+        )
+        assert (wt / "mysub" / ".git").exists()
+
+        monkeypatch.chdir(wt)
+        cmd_split(
+            cli_args(command="split", yes=True, child=True, after=c2, name="top", no_worktree=True)
+        )
+
+        assert repo.git("rev-parse", "mid") == c2
+        assert discover().parent_of["top"] == "mid"
+        assert repo.git("status", "--porcelain", cwd=wt) == ""
+
+    def test_child_split_refuses_uninitialized_submodules(
+        self, repo: RepoHelper, tmp_path, monkeypatch, no_fzf
+    ) -> None:
+        """A worktree made by plain `git worktree add` is the case the init cannot reach."""
+        allow_file_protocol(monkeypatch)
+        add_submodule(repo, "mysub", tmp_path)
+        repo.git("config", "submodule.recurse", "true")
+        c1, _c2 = self._feature(repo)
+        tip = repo.git("rev-parse", "feature")
+        repo.checkout("main")  # free `feature` for a worktree of its own
+        wt = repo.worktree("feature", str(tmp_path / "wt-raw"))
+        monkeypatch.chdir(wt)
+
+        with pytest.raises(TreeError) as exc:
+            cmd_split(
+                cli_args(
+                    command="split", yes=True, child=True, after=c1, name="later", no_worktree=True
+                )
+            )
+
+        assert exc.value.code == 4
+        assert "mysub  (uninitialized)" in exc.value.message
+        assert "submodule update --init --recursive" in exc.value.message
+        # Refused before any mutation, which is the point of a pre-flight.
+        assert repo.git("rev-parse", "feature") == tip
+        branches = repo.git("for-each-ref", "--format=%(refname:short)", "refs/heads/").split()
+        assert "later" not in branches
+
+    def test_child_split_allows_uninitialized_submodules_without_recurse(
+        self, repo: RepoHelper, tmp_path, monkeypatch, no_fzf
+    ) -> None:
+        """Without `submodule.recurse` the reset succeeds and merely leaves the submodule stale,
+        which is a supported choice, so the guard must not block it."""
+        allow_file_protocol(monkeypatch)
+        add_submodule(repo, "mysub", tmp_path)
+        c1, _c2 = self._feature(repo)
+        repo.checkout("main")
+        wt = repo.worktree("feature", str(tmp_path / "wt-raw"))
+        monkeypatch.chdir(wt)
+
+        cmd_split(
+            cli_args(
+                command="split", yes=True, child=True, after=c1, name="later", no_worktree=True
+            )
+        )
+
+        assert repo.git("rev-parse", "feature") == c1
+        assert discover().parent_of["later"] == "feature"
+
+    def test_child_split_allows_target_that_predates_the_submodule(
+        self, repo: RepoHelper, tmp_path, monkeypatch, no_fzf
+    ) -> None:
+        """What decides the reset is what the *target* records, not what the worktree holds.
+
+        The split commit here is below the one that added the submodule, so `reset --hard` just
+        removes the directory and exits 0. Reading `.gitmodules` off disk instead would see an
+        uninitialized submodule at HEAD and refuse a split that works fine.
+        """
+        allow_file_protocol(monkeypatch)
+        repo.branch("feature", parent="main")
+        repo.checkout("feature")
+        c1 = repo.commit("f1.txt", "f1", "f1")  # below the submodule
+        add_submodule(repo, "mysub", tmp_path)  # committed on feature, above c1
+        repo.commit("f2.txt", "f2", "f2")
+        repo.git("config", "submodule.recurse", "true")
+        repo.checkout("main")
+        wt = repo.worktree("feature", str(tmp_path / "wt-raw"))
+        monkeypatch.chdir(wt)
+
+        cmd_split(
+            cli_args(
+                command="split", yes=True, child=True, after=c1, name="later", no_worktree=True
+            )
+        )
+
+        assert repo.git("rev-parse", "feature") == c1
+        assert discover().parent_of["later"] == "feature"
+
+    def test_child_split_refuses_submodule_the_target_reintroduces(
+        self, repo: RepoHelper, tmp_path, monkeypatch, no_fzf
+    ) -> None:
+        """The mirror image: the submodule is absent from the worktree but recorded by the split
+        commit, so the reset would recurse into it and abort. An on-disk scan cannot see this one
+        at all, since there is no directory to find."""
+        allow_file_protocol(monkeypatch)
+        repo.branch("feature", parent="main")
+        repo.checkout("feature")
+        add_submodule(repo, "mysub", tmp_path)
+        c1 = repo.git("rev-parse", "HEAD")  # the split commit: it records the submodule
+        repo.git("rm", "-q", "mysub")
+        repo.git("commit", "-m", "remove submodule")
+        repo.commit("f2.txt", "f2", "f2")
+        repo.git("config", "submodule.recurse", "true")
+        tip = repo.git("rev-parse", "feature")
+        repo.checkout("main")
+        wt = repo.worktree("feature", str(tmp_path / "wt-raw"))
+        monkeypatch.chdir(wt)
+        assert not (wt / "mysub").exists()  # nothing on disk to scan
+
+        with pytest.raises(TreeError) as exc:
+            cmd_split(
+                cli_args(
+                    command="split", yes=True, child=True, after=c1, name="later", no_worktree=True
+                )
+            )
+
+        assert exc.value.code == 4
+        assert "mysub" in exc.value.message
+        assert repo.git("rev-parse", "feature") == tip  # refused before mutating
+
+    def test_child_split_refuses_corrupted_submodule_pointer(
+        self, repo: RepoHelper, tmp_path, monkeypatch, no_fzf
+    ) -> None:
+        """A dangling `.git` pointer aborts the reset too, so existence alone is not the test.
+
+        This is the state the original bug left behind, which made the retry crash in
+        `git status` rather than refuse, so the refusal has to cover it and point at `rebuild`
+        (an init can fail outright on a half-created gitdir).
+        """
+        allow_file_protocol(monkeypatch)
+        add_submodule(repo, "mysub", tmp_path)
+        c1, _c2 = self._feature(repo)
+        repo.git("config", "submodule.recurse", "true")
+        tip = repo.git("rev-parse", "feature")
+        repo.checkout("main")
+        wt = repo.worktree("feature", str(tmp_path / "wt-raw"))
+        _git("submodule", "update", "--init", "--recursive", cwd=wt)
+        corrupt_submodule(wt, "mysub")
+        monkeypatch.chdir(wt)
+
+        with pytest.raises(TreeError) as exc:
+            cmd_split(
+                cli_args(
+                    command="split", yes=True, child=True, after=c1, name="later", no_worktree=True
+                )
+            )
+
+        assert exc.value.code == 4
+        assert "corrupted" in exc.value.message
+        assert "git tree rebuild feature" in exc.value.message
+        assert repo.git("rev-parse", "feature") == tip
+
+
+class TestWorktreeCreationInitsSubmodules:
+    """One shared contract for every command that creates a worktree, so the next one that
+    forgets fails here rather than in a user's chained split. `git worktree add` populates no
+    submodules on any git version, so each caller has to."""
+
+    @pytest.mark.parametrize("command", ["branch", "split", "rebuild"])
+    def test_new_worktree_has_initialized_submodules(
+        self, command: str, repo: RepoHelper, tmp_path, monkeypatch, no_fzf
+    ) -> None:
+        allow_file_protocol(monkeypatch)
+        add_submodule(repo, "mysub", tmp_path)
+        wt = tmp_path / f"wt-{command}"
+
+        if command == "branch":
+            cmd_branch(cli_args(command="branch", name="child", path=str(wt)))
+        elif command == "split":
+            repo.branch("feature", parent="main")
+            repo.checkout("feature")
+            c1 = repo.commit("f1.txt", "f1", "f1")
+            repo.commit("f2.txt", "f2", "f2")
+            cmd_split(
+                cli_args(command="split", yes=True, after=c1, name="earlier", worktree=str(wt))
+            )
+        else:
+            repo.branch("child", parent="main")
+            wt = repo.worktree("child", str(wt))
+            _git("submodule", "update", "--init", "--recursive", cwd=wt)
+            corrupt_submodule(wt, "mysub")
+            cmd_rebuild(cli_args(branch="child", yes=True, force=True))
+
+        assert (wt / "mysub" / ".git").exists()
+        assert (wt / "mysub" / "readme.txt").exists()
 
 
 class TestPropagateSubmoduleHealth:

@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING, NoReturn
 from git_tree._errors import ErrorKind, TreeError
 from git_tree._git import (
     _check_submodule_health,
+    _config_bool,
+    _gitlink_paths,
     _has_active_rebase,
     _has_active_rebase_safe,
     _has_unmerged,
@@ -208,4 +210,47 @@ def _require_healthy_submodules(branches: list[str], graph: Graph) -> None:
     for b, sub_path in unhealthy:
         lines.append(f"  {b}  (submodule: {sub_path})")
     lines.append("\nFix with: git tree rebuild <branch>")
+    raise TreeError("\n".join(lines), code=4)
+
+
+def _require_initialized_submodules(worktree: Path, commit: str, branch: str) -> None:
+    """Pre-flight for a `git reset --hard <commit>` in `worktree`: refuse when a submodule the
+    target records is not usable and `submodule.recurse` is set.
+
+    `submodule.recurse` makes `reset` recurse, and recursing into a submodule whose gitdir it
+    cannot open aborts with `could not reset submodule index` *after* the superproject index and
+    worktree are partly rewritten. `git worktree add` populates no submodules, so any worktree not
+    created by `git tree` is a candidate. `_require_healthy_submodules` cannot stand in for this:
+    it reads the worktree and calls a missing `.git` benign, which is right for a cascade but is
+    exactly the case that breaks a reset.
+
+    Both unusable states block, and they need different repairs: no `.git` at all is uninitialized
+    and an init fixes it, while a `.git` whose gitdir does not resolve is corrupted and an init can
+    fail on it outright, so that one goes to `rebuild`.
+
+    Gated on the config because with recursion off the reset succeeds, merely leaving submodules
+    stale, which is a supported choice and not ours to block.
+    """
+    if not _config_bool("submodule.recurse", cwd=worktree):
+        return
+    uninitialized: list[str] = []
+    corrupted: list[str] = []
+    for p in _gitlink_paths(commit, cwd=worktree):
+        if not (worktree / p / ".git").exists():
+            uninitialized.append(p)
+        elif not _check_submodule_health(worktree, p):
+            corrupted.append(p)
+    if not uninitialized and not corrupted:
+        return
+    lines = [
+        f"{worktree} cannot be rewound: submodule.recurse is set, so `git reset --hard` will "
+        f"recurse into submodules that {commit[:12]} records, and these are not usable:"
+    ]
+    lines += [f"  {p}  (uninitialized)" for p in uninitialized]
+    lines += [f"  {p}  (corrupted .git pointer)" for p in corrupted]
+    lines.append("\nIt would fail partway and leave the worktree half-rewound. Fix with:")
+    if uninitialized:
+        lines.append(f"  git -C {worktree} submodule update --init --recursive")
+    if corrupted:
+        lines.append(f"  git tree rebuild {branch}")
     raise TreeError("\n".join(lines), code=4)
