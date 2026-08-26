@@ -17,6 +17,7 @@ SKILL_NAMES = {
     "git-tree-propagate",
     "git-tree-plan",
     "git-tree-plan-impl",
+    "git-tree-stack-prs",
 }
 
 
