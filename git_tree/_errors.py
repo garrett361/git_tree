@@ -22,6 +22,7 @@ class ErrorKind(StrEnum):
     CONFIRMATION_REQUIRED = "confirmation_required"
     LEASE_REJECTED = "lease_rejected"
     UNRESOLVED_CONFLICTS = "unresolved_conflicts"
+    STALE_FORK = "stale_fork"
 
 
 class TreeError(SystemExit):

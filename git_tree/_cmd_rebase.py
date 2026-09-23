@@ -26,10 +26,11 @@ from git_tree._git import (
     git_lines,
     git_ok,
 )
-from git_tree._graph import _get_fork_commit, discover, root_of
+from git_tree._graph import _get_fork_commit, _resolve_fork_arg, discover, root_of
 from git_tree._guards import (
     _mid_rebase_branches,
     _require_clean_state,
+    _require_fresh_forks,
     _require_healthy_submodules,
     _require_ready,
 )
@@ -53,6 +54,17 @@ def arguments(p: argparse.ArgumentParser) -> None:
         "--no-descendants",
         action="store_true",
         help="Rebase only branch, without cascading to its descendants",
+    )
+    p.add_argument(
+        "--fork",
+        metavar="COMMIT",
+        help="Replay only branch's commits after COMMIT (an ancestor of branch), instead of "
+        "those after its recorded fork",
+    )
+    p.add_argument(
+        "--allow-stale-fork",
+        action="store_true",
+        help="Skip the check that refuses to replay a branch from a stale fork",
     )
     p.add_argument("-y", "--yes", action="store_true", help="Skip the confirmation prompt")
 
@@ -117,7 +129,11 @@ def cmd_rebase(args: argparse.Namespace) -> None:
             f"in the tree (would create a cycle)."
         )
 
-    fork_point = _get_fork_commit(branch, old_parent, graph.branches.get(branch))
+    fork_point = (
+        _resolve_fork_arg(branch, args.fork)
+        if args.fork is not None
+        else _get_fork_commit(branch, old_parent, graph.branches.get(branch))
+    )
     commit_count = len(git_lines("rev-list", f"{fork_point}..{branch}"))
 
     descendants = graph.downstream_from(branch)
@@ -170,6 +186,12 @@ def cmd_rebase(args: argparse.Namespace) -> None:
     _require_clean_state([branch], graph, resume_cmd)
     if descendants and not args.no_descendants:
         _require_ready(descendants, graph, resume_cmd)
+    if not args.allow_stale_fork:
+        # An explicit --fork is the user's answer for branch itself, so only descendants remain.
+        checked = [] if args.fork is not None else [branch]
+        if not args.no_descendants:
+            checked += descendants
+        _require_fresh_forks(checked, graph, rebase_onto=(branch, target))
 
     print(f"Rebasing onto {target}:")
     print(f"  {branch}  [{commit_count} commits]  (old parent: {old_parent})")

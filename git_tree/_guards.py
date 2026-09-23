@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shlex
 from typing import TYPE_CHECKING, NoReturn
 
 from git_tree._errors import ErrorKind, TreeError
@@ -19,6 +20,7 @@ from git_tree._git import (
     _worktree_status,
     git_lines,
 )
+from git_tree._graph import _get_fork_commit, _stale_fork_boundary
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -185,6 +187,44 @@ def _require_ready(branches: list[str], graph: Graph, resume_cmd: list[str]) -> 
     _require_worktrees(branches, graph)
     _require_healthy_submodules(branches, graph)
     _require_clean_state(branches, graph, resume_cmd)
+
+
+def _require_fresh_forks(
+    branches: list[str], graph: Graph, *, rebase_onto: tuple[str, str] | None = None
+) -> None:
+    """Refuse a cascade that would replay any of `branches` from a stale fork (see
+    `_stale_fork_boundary`), before anything is rewritten. `rebase_onto=(branch, target)` names
+    the branch `git tree rebase` is moving, so its remedy is `rebase --fork` rather than the
+    `attach --fork` every other branch gets. `--allow-stale-fork` skips this gate."""
+    stale: list[str] = []
+    lines = ["These branches would replay from a stale fork:"]
+    for b in branches:
+        parent = graph.parent_of.get(b)
+        if not parent:
+            continue
+        info = graph.branches.get(b)
+        boundary = _stale_fork_boundary(b, parent, info)
+        if boundary is None:
+            continue
+        stale.append(b)
+        fork = _get_fork_commit(b, parent, info)
+        replay_now = len(git_lines("rev-list", f"{fork}..{b}"))
+        replay_fixed = len(git_lines("rev-list", f"{boundary}..{b}"))
+        copies = replay_now - replay_fixed
+        if rebase_onto and rebase_onto[0] == b:
+            fix = f"git tree rebase {rebase_onto[1]} {b} --fork {boundary}"
+        else:
+            where = f"-C {shlex.quote(str(info.worktree))} " if info and info.worktree else ""
+            fix = f"git {where}tree attach {parent} --fork {boundary}, then re-run"
+        lines += [
+            f"  {b}: its first {copies} commits copy commits {parent} already has, so the "
+            f"replay would be {replay_now} commits instead of {replay_fixed}.",
+            f"    fix: {fix}",
+        ]
+    if not stale:
+        return
+    lines.append("\nIf this is a false alarm, re-run with --allow-stale-fork.")
+    raise TreeError("\n".join(lines), code=4, kind=ErrorKind.STALE_FORK, branches=stale)
 
 
 def _require_healthy_submodules(branches: list[str], graph: Graph) -> None:

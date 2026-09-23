@@ -202,16 +202,20 @@ def _would_cycle(branch: str, new_parent: str) -> bool:
     return False
 
 
-def _register_child(child: str, parent: str, *, fork: str | None = None) -> None:
+def _register_child(
+    child: str, parent: str, *, fork: str | None = None, warn_if_not_descendant: bool = True
+) -> None:
     """Register `child` under `parent`: write the tree-parent edge and the fork point
     (the merge-base, where propagate/rebase replay from), warning if `child` doesn't
     descend from `parent` and raising if they share no history. Pass `fork` to reuse an
-    already-computed merge-base. Callers handle the self/cycle checks."""
+    already-computed merge-base or to record a user-chosen boundary, and
+    `warn_if_not_descendant=False` when that boundary makes the warning moot. Callers
+    handle the self/cycle checks."""
     base = fork or git("merge-base", parent, child, check=False)
     if not base:
         raise TreeError(f"No common history between {parent} and {child}.")
     is_ancestor = git_ok("merge-base", "--is-ancestor", parent, child)
-    if not is_ancestor and base != git("rev-parse", parent):
+    if warn_if_not_descendant and not is_ancestor and base != git("rev-parse", parent):
         print(f"Warning: {child} does not appear to descend from {parent}.", file=sys.stderr)
     git("config", f"branch.{child}.tree-parent-branch", parent)
     _set_fork_commit(child, base)

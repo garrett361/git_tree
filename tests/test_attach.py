@@ -150,6 +150,39 @@ class TestAttachForkCommit:
         fork = repo.git("config", "--get", "branch.b.tree-fork-commit")
         assert repo.git("log", "--oneline", f"{fork}..b").count("\n") == 0  # B1 alone
 
+    def test_fork_flag_records_the_given_commit(
+        self, repo: RepoHelper, monkeypatch, tmp_path, capsys
+    ) -> None:
+        """An explicit --fork is recorded as given, and silences the descent warning it answers."""
+        repo.git("checkout", "-b", "b")
+        repo.commit("b1.txt", "b1", "B1")
+        b1 = repo.head
+        repo.commit("b2.txt", "b2", "B2")
+        repo.checkout("main")
+        repo.commit("m.txt", "m", "M")  # main moves on, so b no longer descends from it
+
+        monkeypatch.chdir(repo.worktree("b", str(tmp_path / "wt-b")))
+        cmd_attach(_ns(parent="main", fork=b1[:9]))
+
+        assert repo.git("config", "--get", "branch.b.tree-fork-commit") == b1
+        assert "does not appear to descend" not in capsys.readouterr().err
+
+    def test_fork_flag_refuses_a_non_ancestor_and_writes_no_config(
+        self, repo: RepoHelper, monkeypatch, tmp_path
+    ) -> None:
+        repo.git("checkout", "-b", "b")
+        repo.commit("b1.txt", "b1", "B1")
+        repo.checkout("main")
+        off_line = repo.commit("m.txt", "m", "M")
+
+        monkeypatch.chdir(repo.worktree("b", str(tmp_path / "wt-b")))
+        with pytest.raises(TreeError) as exc:
+            cmd_attach(_ns(parent="main", fork=off_line))
+
+        assert exc.value.code == 4
+        assert repo.git("config", "--get", "branch.b.tree-parent-branch", check=False) == ""
+        assert repo.git("config", "--get", "branch.b.tree-fork-commit", check=False) == ""
+
 
 class TestDetach:
     def _branch_config(self, repo: RepoHelper, branch: str) -> subprocess.CompletedProcess:

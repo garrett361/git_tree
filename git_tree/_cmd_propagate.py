@@ -14,7 +14,7 @@ from git_tree._engine import (
 from git_tree._errors import TreeError
 from git_tree._git import _has_active_rebase, current_branch
 from git_tree._graph import _get_fork_commit, discover
-from git_tree._guards import _require_ready
+from git_tree._guards import _require_fresh_forks, _require_ready
 from git_tree._prompt import _proceed
 from git_tree._registry import subcommand
 from git_tree._render import _set_completer
@@ -34,6 +34,11 @@ def arguments(p: argparse.ArgumentParser) -> None:
         "--no-descendants",
         action="store_true",
         help="Finish branch's own interrupted rebase without cascading to its descendants",
+    )
+    p.add_argument(
+        "--allow-stale-fork",
+        action="store_true",
+        help="Skip the check that refuses to replay a descendant from a stale fork",
     )
     p.add_argument("-y", "--yes", action="store_true", help="Skip the confirmation prompt")
 
@@ -79,6 +84,10 @@ def cmd_propagate(args: argparse.Namespace) -> None:
         return
     else:
         _require_ready(descendants, graph, resume_cmd)
+        # A resume continues a cascade whose descendants were all checked before it started;
+        # a half-replayed range would only misread.
+        if not is_resume and not args.allow_stale_fork:
+            _require_fresh_forks(descendants, graph)
 
     print(f"Propagating from {branch}:")
     if args.no_descendants:

@@ -65,6 +65,11 @@ FOR AGENTS:
   exit codes         3 resumable conflict, 4 precondition/state, 5 not-a-tree-branch;
                      error.kind is one of usage/conflict/precondition/not_a_tree_branch/error
                      plus input_required/confirmation_required/lease_rejected/unresolved_conflicts
+                     /stale_fork
+  stale fork         a branch whose replay would open with its own copies of its parent's
+                     commits is refused (kind=stale_fork, forest field `stale_fork`); fix with
+                     `attach <parent> --fork <sha>` or `rebase <target> <branch> --fork <sha>`,
+                     or override with --allow-stale-fork
   full contract      see AGENTS.md in the git-tree source repo
 """
 

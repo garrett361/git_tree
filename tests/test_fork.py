@@ -12,13 +12,18 @@ off the child's true fork and the old code replays the wrong range.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from git_tree._cmd_attach import cmd_attach
 from git_tree._cmd_branch import cmd_branch
 from git_tree._cmd_propagate import cmd_propagate
+from git_tree._cmd_rebase import cmd_rebase
 from git_tree._cmd_split import cmd_split
+from git_tree._errors import ConflictError, TreeError
 from git_tree._graph import BranchInfo, _get_fork_commit, discover
+from git_tree.cli import main
 
 from .conftest import RepoHelper, cli_args
 
@@ -345,3 +350,261 @@ class TestCleanCascade:
         # The advanced main commit reached every descendant exactly once.
         for ref in ("b", "c", "d"):
             assert sum("advance main" in line for line in repo.log_oneline(ref)) == 1
+
+
+def _stale_child(repo: RepoHelper, monkeypatch, tmp_path) -> tuple[str, str]:
+    """Reproduce a child attached to a rewritten parent it holds old copies of.
+
+    P = [A, B] off main and C = P + [C1, C2]. P is then rewritten to [X, A', B', Z]: A' and B'
+    are patch-identical cherry-picks of A and B, and Z edits the line they touch. Attaching C
+    afterwards records merge-base(P, C) = main as its fork, so a cascade would replay A and B
+    onto Z and conflict. Returns (C's copy of B, which is the boundary to replay from; C's tip)."""
+    repo.commit("f.txt", "0", "base f")
+    repo.branch("P", parent="main")
+    wt_p = repo.worktree("P", str(tmp_path / "wt-P"))
+    _commit_in(repo, wt_p, "f.txt", "a", "A")
+    _commit_in(repo, wt_p, "f.txt", "b", "B")
+    b_copy = repo.git("rev-parse", "P")
+
+    repo.git("branch", "C", "P")
+    wt_c = repo.worktree("C", str(tmp_path / "wt C"))
+    _commit_in(repo, wt_c, "c1.txt", "c1", "C1")
+    _commit_in(repo, wt_c, "c2.txt", "c2", "C2")
+
+    repo.git("reset", "--hard", "main", cwd=wt_p)
+    _commit_in(repo, wt_p, "x.txt", "x", "X")
+    repo.git("cherry-pick", f"{b_copy}~1", b_copy, cwd=wt_p)
+    _commit_in(repo, wt_p, "f.txt", "z", "Z")
+
+    monkeypatch.chdir(wt_c)
+    cmd_attach(cli_args(parent="P"))
+    monkeypatch.chdir(repo.work)
+    return b_copy, repo.git("rev-parse", "C")
+
+
+def _json_stale_forks(capsys) -> dict[str, str | None]:
+    capsys.readouterr()
+    main(["--json"])
+    return {b["name"]: b["stale_fork"] for b in json.loads(capsys.readouterr().out)["branches"]}
+
+
+class TestStaleFork:
+    """A child whose fork leaves copies of its parent's commits at the front of the replay."""
+
+    def test_fixture_really_conflicts_without_the_guard(
+        self, repo: RepoHelper, monkeypatch, tmp_path
+    ) -> None:
+        _stale_child(repo, monkeypatch, tmp_path)
+        with pytest.raises(ConflictError):
+            cmd_propagate(cli_args(branch="P", yes=True, allow_stale_fork=True))
+
+    def test_propagate_refuses_before_rewriting(
+        self, repo: RepoHelper, monkeypatch, tmp_path
+    ) -> None:
+        b_copy, c_tip = _stale_child(repo, monkeypatch, tmp_path)
+        with pytest.raises(TreeError) as exc:
+            cmd_propagate(cli_args(branch="P", yes=True))
+
+        assert exc.value.kind == "stale_fork"
+        assert exc.value.code == 4
+        assert exc.value.branches == ["C"]
+        assert f"git -C '{tmp_path / 'wt C'}' tree attach P --fork {b_copy}," in exc.value.message
+        assert repo.git("rev-parse", "C") == c_tip
+
+    def test_printed_attach_remedy_replays_only_own_commits(
+        self, repo: RepoHelper, monkeypatch, tmp_path
+    ) -> None:
+        b_copy, _ = _stale_child(repo, monkeypatch, tmp_path)
+        monkeypatch.chdir(tmp_path / "wt C")
+        cmd_attach(cli_args(parent="P", fork=b_copy))
+        monkeypatch.chdir(repo.work)
+
+        cmd_propagate(cli_args(branch="P", yes=True))
+
+        assert repo.git("log", "--format=%s", "P..C").splitlines() == ["C2", "C1"]
+        assert repo.git("show", "C:f.txt") == "z"
+
+    def test_rebase_refuses_the_named_branch_and_its_fork_flag_fixes_it(
+        self, repo: RepoHelper, monkeypatch, tmp_path
+    ) -> None:
+        b_copy, c_tip = _stale_child(repo, monkeypatch, tmp_path)
+        with pytest.raises(TreeError) as exc:
+            cmd_rebase(cli_args(target="P", branch="C", yes=True))
+        assert exc.value.kind == "stale_fork"
+        assert f"git tree rebase P C --fork {b_copy}\n" in exc.value.message
+        assert repo.git("rev-parse", "C") == c_tip
+
+        cmd_rebase(cli_args(target="P", branch="C", yes=True, fork=b_copy[:9]))
+
+        assert repo.git("log", "--format=%s", "P..C").splitlines() == ["C2", "C1"]
+
+    def test_rebase_onto_another_target_honors_allow_stale_fork(
+        self, repo: RepoHelper, monkeypatch, tmp_path
+    ) -> None:
+        b_copy, c_tip = _stale_child(repo, monkeypatch, tmp_path)
+        repo.git("branch", "T", "P")
+        with pytest.raises(TreeError) as exc:
+            cmd_rebase(cli_args(target="T", branch="C", yes=True))
+        assert exc.value.kind == "stale_fork"
+        assert f"git tree rebase T C --fork {b_copy}\n" in exc.value.message
+        assert repo.git("rev-parse", "C") == c_tip
+
+        with pytest.raises(ConflictError):
+            cmd_rebase(cli_args(target="T", branch="C", yes=True, allow_stale_fork=True))
+
+    def test_fully_edited_copies_are_not_flagged(
+        self, repo: RepoHelper, monkeypatch, tmp_path, capsys
+    ) -> None:
+        """Copies that match the parent only by subject are replayed, never dropped."""
+        repo.commit("f.txt", "0", "base f")
+        repo.branch("P", parent="main")
+        wt_p = repo.worktree("P", str(tmp_path / "wt-P"))
+        _commit_in(repo, wt_p, "f.txt", "a", "A")
+        _commit_in(repo, wt_p, "g.txt", "b", "B")
+        repo.git("branch", "C", "P")
+        wt_c = repo.worktree("C", str(tmp_path / "wt-C"))
+        _commit_in(repo, wt_c, "c1.txt", "c1", "C1")
+        repo.git("reset", "--hard", "main", cwd=wt_p)
+        _commit_in(repo, wt_p, "f.txt", "a-edited", "A")
+        _commit_in(repo, wt_p, "g.txt", "b-edited", "B")
+        monkeypatch.chdir(wt_c)
+        cmd_attach(cli_args(parent="P"))
+        monkeypatch.chdir(repo.work)
+
+        assert _json_stale_forks(capsys)["C"] is None
+        with pytest.raises(ConflictError):
+            cmd_propagate(cli_args(branch="P", yes=True))
+
+    def test_boundary_stops_at_the_last_exact_copy(
+        self, repo: RepoHelper, monkeypatch, tmp_path, capsys
+    ) -> None:
+        repo.branch("P", parent="main")
+        wt_p = repo.worktree("P", str(tmp_path / "wt-P"))
+        _commit_in(repo, wt_p, "f.txt", "a", "A")
+        a_copy = repo.git("rev-parse", "P")
+        _commit_in(repo, wt_p, "g.txt", "b", "B")
+        repo.git("branch", "C", "P")
+        wt_c = repo.worktree("C", str(tmp_path / "wt-C"))
+        _commit_in(repo, wt_c, "c1.txt", "c1", "C1")
+        repo.git("reset", "--hard", "main", cwd=wt_p)
+        _commit_in(repo, wt_p, "x.txt", "x", "X")
+        repo.git("cherry-pick", a_copy, cwd=wt_p)
+        _commit_in(repo, wt_p, "g.txt", "b-edited", "B")
+        monkeypatch.chdir(wt_c)
+        cmd_attach(cli_args(parent="P"))
+        monkeypatch.chdir(repo.work)
+
+        assert _json_stale_forks(capsys)["C"] == a_copy
+        monkeypatch.chdir(wt_c)
+        cmd_attach(cli_args(parent="P", fork=a_copy))
+        monkeypatch.chdir(repo.work)
+        with pytest.raises(ConflictError):
+            cmd_propagate(cli_args(branch="P", yes=True))
+
+    def test_a_child_made_only_of_copies_resets_onto_its_parent(
+        self, repo: RepoHelper, monkeypatch, tmp_path, capsys
+    ) -> None:
+        repo.branch("P", parent="main")
+        wt_p = repo.worktree("P", str(tmp_path / "wt-P"))
+        _commit_in(repo, wt_p, "f.txt", "a", "A")
+        _commit_in(repo, wt_p, "g.txt", "b", "B")
+        old_p = repo.git("rev-parse", "P")
+        repo.git("branch", "C", "P")
+        wt_c = repo.worktree("C", str(tmp_path / "wt-C"))
+        repo.git("reset", "--hard", "main", cwd=wt_p)
+        repo.git("cherry-pick", old_p, f"{old_p}~1", cwd=wt_p)
+        monkeypatch.chdir(wt_c)
+        cmd_attach(cli_args(parent="P"))
+        monkeypatch.chdir(repo.work)
+
+        assert _json_stale_forks(capsys)["C"] == old_p
+        monkeypatch.chdir(wt_c)
+        cmd_attach(cli_args(parent="P", fork=old_p))
+        monkeypatch.chdir(repo.work)
+        cmd_propagate(cli_args(branch="P", yes=True))
+
+        assert repo.git("rev-parse", "C") == repo.git("rev-parse", "P")
+
+    def test_two_shared_generic_subjects_are_not_stale(
+        self, repo: RepoHelper, monkeypatch, tmp_path, capsys
+    ) -> None:
+        """A healthy child whose own commits share subjects, not patches, with its rebased
+        parent is an ordinary propagate."""
+        repo.branch("P", parent="main")
+        wt_p = repo.worktree("P", str(tmp_path / "wt-P"))
+        _commit_in(repo, wt_p, "p1.txt", "p1", "wip")
+        _commit_in(repo, wt_p, "p2.txt", "p2", "wip")
+        repo.git("branch", "C", "P")
+        wt_c = repo.worktree("C", str(tmp_path / "wt-C"))
+        _commit_in(repo, wt_c, "c1.txt", "c1", "wip")
+        _commit_in(repo, wt_c, "c2.txt", "c2", "wip")
+        monkeypatch.chdir(wt_c)
+        cmd_attach(cli_args(parent="P"))
+        monkeypatch.chdir(repo.work)
+        repo.commit("m.txt", "m", "advance main")
+        repo.git("rebase", "main", cwd=wt_p)
+
+        assert _json_stale_forks(capsys)["C"] is None
+        cmd_propagate(cli_args(branch="P", yes=True))
+
+        assert repo.git("log", "--format=%s", "P..C").splitlines() == ["wip", "wip"]
+        assert repo.git("show", "C:c2.txt") == "c2"
+
+    def test_own_commits_after_an_upstreamed_copy_are_kept(
+        self, repo: RepoHelper, monkeypatch, tmp_path, capsys
+    ) -> None:
+        repo.branch("P", parent="main")
+        wt_p = repo.worktree("P", str(tmp_path / "wt-P"))
+        _commit_in(repo, wt_p, "p1.txt", "p1", "wip")
+        _commit_in(repo, wt_p, "p2.txt", "p2", "wip")
+        repo.git("branch", "C", "P")
+        wt_c = repo.worktree("C", str(tmp_path / "wt-C"))
+        _commit_in(repo, wt_c, "h.txt", "h", "hotfix")
+        hotfix = repo.git("rev-parse", "C")
+        _commit_in(repo, wt_c, "c1.txt", "c1", "wip")
+        _commit_in(repo, wt_c, "c2.txt", "c2", "wip")
+        _commit_in(repo, wt_c, "feat.txt", "f", "feature")
+        monkeypatch.chdir(wt_c)
+        cmd_attach(cli_args(parent="P"))
+        monkeypatch.chdir(repo.work)
+        repo.git("cherry-pick", hotfix)
+        repo.commit("m.txt", "m", "advance main")
+        repo.git("rebase", "main", cwd=wt_p)
+
+        assert _json_stale_forks(capsys)["C"] == hotfix
+        monkeypatch.chdir(wt_c)
+        cmd_attach(cli_args(parent="P", fork=hotfix))
+        monkeypatch.chdir(repo.work)
+        cmd_propagate(cli_args(branch="P", yes=True))
+
+        assert repo.git("log", "--format=%s", "P..C").splitlines() == ["feature", "wip", "wip"]
+
+    def test_one_shared_generic_subject_is_not_stale(
+        self, repo: RepoHelper, monkeypatch, tmp_path
+    ) -> None:
+        """A drifted child whose first commit shares a subject, not a patch, with a new parent
+        commit is an ordinary propagate."""
+        repo.branch("P", parent="main")
+        wt_p = repo.worktree("P", str(tmp_path / "wt-P"))
+        _commit_in(repo, wt_p, "p.txt", "p", "P1")
+        repo.git("branch", "C", "P")
+        repo.set_parent("C", "P")
+        wt_c = repo.worktree("C", str(tmp_path / "wt-C"))
+        _commit_in(repo, wt_c, "c.txt", "c", "wip")
+        _commit_in(repo, wt_c, "c2.txt", "c2", "C2")
+        _commit_in(repo, wt_p, "q.txt", "q", "wip")
+
+        cmd_propagate(cli_args(branch="P", yes=True))
+
+        assert repo.git("log", "--format=%s", "P..C").splitlines() == ["C2", "wip"]
+
+    def test_json_forest_reports_the_boundary(
+        self, repo: RepoHelper, monkeypatch, tmp_path, capsys
+    ) -> None:
+        b_copy, _ = _stale_child(repo, monkeypatch, tmp_path)
+        capsys.readouterr()
+        main(["--json"])
+        branches = {b["name"]: b for b in json.loads(capsys.readouterr().out)["branches"]}
+
+        assert branches["C"]["stale_fork"] == b_copy
+        assert branches["P"]["stale_fork"] is None

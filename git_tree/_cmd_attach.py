@@ -12,6 +12,7 @@ from git_tree._git import (
     current_branch,
     git_ok,
 )
+from git_tree._graph import _resolve_fork_arg
 from git_tree._prompt import _require_input, _select_one
 from git_tree._registry import subcommand
 from git_tree._render import _set_completer
@@ -24,6 +25,12 @@ def arguments(p: argparse.ArgumentParser) -> None:
     _set_completer(
         p.add_argument("parent", nargs="?", help="Parent branch (fzf if omitted)"),
         "git_heads",
+    )
+    p.add_argument(
+        "--fork",
+        metavar="COMMIT",
+        help="Record COMMIT (an ancestor of the branch) as the fork: the next propagate or "
+        "rebase replays only the commits after it. Default: merge-base with the parent",
     )
 
 
@@ -62,5 +69,10 @@ def cmd_attach(args: argparse.Namespace) -> None:
             f"in the tree (would create a cycle)."
         )
 
-    _register_child(branch, parent)
-    print(f"Attached {branch} to {parent}")
+    if args.fork is None:
+        _register_child(branch, parent)
+        print(f"Attached {branch} to {parent}")
+        return
+    fork = _resolve_fork_arg(branch, args.fork)
+    _register_child(branch, parent, fork=fork, warn_if_not_descendant=False)
+    print(f"Attached {branch} to {parent} (fork {fork[:9]})")

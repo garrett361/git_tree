@@ -19,6 +19,7 @@ from git_tree._graph import (
     Graph,
     _get_fork_commit,
     _root_remote,
+    _stale_fork_boundary,
     roots,
 )
 
@@ -207,7 +208,13 @@ def _tree_json(graph: Graph) -> dict:
             "ahead": None,
             "behind": None,
             "pending_from_parent": _pending_commit_count(parent, name, info) if parent else None,
+            "stale_fork": None,
         }
+        if parent:
+            snap = info.snapshot if info else None
+            entry["stale_fork"] = (
+                snap.stale_fork if snap else _stale_fork_boundary(name, parent, info)
+            )
         if worktree:
             snap = info.snapshot if info else None
             st = snap.status if snap else _worktree_status(worktree)
@@ -263,6 +270,7 @@ def _hydrate(graph: Graph, branches: list[str]) -> None:
             ahead_behind=_ahead_behind(info.name, remote, wt),
             pending=_pending_commit_count(parent, info.name, info) if parent else 0,
             rebase_in_progress=_has_active_rebase(wt),
+            stale_fork=_stale_fork_boundary(info.name, parent, info) if parent else None,
         )
 
     with ThreadPoolExecutor(max_workers=min(len(targets), 32)) as ex:

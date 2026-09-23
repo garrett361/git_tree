@@ -26,6 +26,12 @@ unresolved conflicts or hand-started rebase. Uncommitted changes do not block th
 git-tree stashes a dirty worktree and pops it afterward, though the pop can conflict and a
 conflict mid-cascade leaves the stash unpopped, so committing first is still tidier.
 
+Every child and descendant also needs `stale_fork: null`. A sha there means the branch's recorded
+fork would make it replay its own old copies of its parent's commits; step 3 refuses such a
+cascade with `kind: stale_fork`. Repair each one first, following the `stale_fork` section of
+the `git-tree-doctor` skill: confirm the copies by patch, then run
+`git tree attach <its-parent> --fork <sha>` from that branch's worktree.
+
 ## 2. Update the parent first
 
 ```sh

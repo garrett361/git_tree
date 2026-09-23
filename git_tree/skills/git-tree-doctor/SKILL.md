@@ -11,12 +11,31 @@ git tree --json
 
 This reports the whole forest even when the current branch is not in a tree, and it includes
 broken branches the normal display omits. Read `cycles`, `orphans`, and per branch
-`orphaned_parent`, `cyclic`, `worktree`, `dirty`, `conflicted`, `rebase_in_progress`.
+`orphaned_parent`, `cyclic`, `worktree`, `dirty`, `conflicted`, `rebase_in_progress`,
+`stale_fork`.
 
 **Report the diagnosis before changing anything.** These fixes delete worktrees and rewrite tree
 structure. Apply one at a time and re-run `git tree --json` after each, since one broken edge
 often masks another. Never hand-edit `branch.<name>.tree-parent-branch` or
-`branch.<name>.tree-fork-commit`.
+`branch.<name>.tree-fork-commit`; to set the fork, use `git tree attach <parent> --fork <commit>`.
+
+## `stale_fork: <sha>`, or a refusal with `kind: stale_fork`
+
+The branch does not descend from its parent, and its replay range opens with its own copies of
+commits the parent already has, usually because the parent was rewritten after the branch stacked
+on it. A cascade would replay those copies and conflict. `<sha>` is the last copy, so the fix is to
+record it as the fork, from the branch's own worktree:
+
+```sh
+git tree attach <parent> --fork <sha>
+```
+
+Confirm with the user first that the commits up to `<sha>` really are copies. Matching subjects
+are not enough; check the patches with `git cherry -v <parent> <sha> <fork>`, where `<fork>` is
+`git config branch.<branch>.tree-fork-commit` (or `git merge-base <parent> <branch>` if unset).
+Every line it prints must start with `-`. For the branch that `git tree rebase`
+is moving, `git tree rebase <target> <branch> --fork <sha>` does the same in one step. If the
+detection is wrong, re-run the refused command with `--allow-stale-fork`.
 
 ## `orphaned_parent: <name>`
 

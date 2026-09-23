@@ -324,7 +324,8 @@ class TestCompletionGeneration:
         for shell in ("zsh", "bash"):
             script = _render_completions(_build_parser(), shell)
             for flag in ("--json", "--no-input", "--all"):
-                assert flag not in script, f"{shell} should not list {flag}"
+                # Whole-flag match, so a longer flag sharing the prefix (`--allow-...`) is fine.
+                assert not re.search(rf"{flag}(?![\w-])", script), f"{shell} should not list {flag}"
 
     def test_zsh_escapes_apostrophes_in_descriptions(self) -> None:
         # `remove`'s and split's help contain ASCII apostrophes; inside a single-quoted _describe

@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import sys
+from collections import Counter
 from dataclasses import dataclass, field
+from itertools import takewhile
 from pathlib import Path
 
+from git_tree._errors import TreeError
 from git_tree._git import (
     WorktreeStatus,
     _active_rebase_branch,
@@ -14,6 +17,7 @@ from git_tree._git import (
     _worktree_status,
     all_branch_names,
     git,
+    git_lines,
     git_ok,
 )
 
@@ -49,6 +53,67 @@ def _get_fork_commit(branch: str, parent: str, info: BranchInfo | None = None) -
     return git("merge-base", parent, branch, check=False)
 
 
+def _resolve_fork_arg(branch: str, commit: str) -> str:
+    """Resolve a user-supplied `--fork` to a full sha, refusing one `_get_fork_commit` would
+    not honor (not an ancestor of `branch`) rather than letting it fall back to merge-base."""
+    sha = git("rev-parse", "--verify", "--quiet", f"{commit}^{{commit}}", check=False)
+    if not sha:
+        raise TreeError(f"--fork {commit} is not a commit.", code=4)
+    if not git_ok("merge-base", "--is-ancestor", sha, branch):
+        raise TreeError(
+            f"--fork {commit} is not an ancestor of {branch}; the fork must be on {branch}'s "
+            f"own history, since the commits after it are what gets replayed.",
+            code=4,
+        )
+    return sha
+
+
+def _stale_fork_boundary(branch: str, parent: str, info: BranchInfo | None = None) -> str | None:
+    """The commit `branch` should replay from instead of its fork, or None if the fork is sound.
+
+    A fork is stale when `branch` does not descend from `parent` and its replay range opens with
+    its own copies of commits `parent` gained since the fork, typically because `parent` was
+    rewritten and `branch` was then attached at their merge-base. Replaying the copies re-applies
+    work `parent` already has, possibly in another order, so it conflicts; the cascade's
+    `--no-reapply-cherry-picks` cannot drop them, since the fork is passed as `<upstream>` and
+    nothing on that side is compared. Candidates are the leading commits whose subjects match
+    `fork..parent`, each parent commit at most once; the copies are the leading candidates that
+    are also patch-equivalent to a parent commit, so a commit matching only by subject ("wip")
+    is never dropped. A range with merges is never flagged. Returns the last copy.
+    """
+    # A missing parent (an orphan read by `--json`) has nothing to copy from.
+    if not git_ok("rev-parse", "--verify", "--quiet", parent):
+        return None
+    if git_ok("merge-base", "--is-ancestor", parent, branch):
+        return None
+    fork = _get_fork_commit(branch, parent, info)
+    if not fork:
+        return None
+    if git("rev-list", "--merges", "-n1", f"{fork}..{branch}"):
+        return None
+    parent_subjects = Counter(git_lines("log", "--format=%s", f"{fork}..{parent}"))
+    if not parent_subjects:
+        return None
+    run: list[str] = []
+    for line in git_lines("log", "--reverse", "--format=%H %s", f"{fork}..{branch}"):
+        sha, _, subject = line.partition(" ")
+        if not parent_subjects[subject]:
+            break
+        parent_subjects[subject] -= 1
+        run.append(sha)
+    if not run:
+        return None
+    # `git cherry <parent> <last> <first>^` marks each commit of the run, oldest first, with `-`
+    # when a patch-equivalent commit is on `parent` but not the run, here meaning `fork..parent`.
+    copies = list(
+        takewhile(
+            lambda line: line.startswith("- "),
+            git_lines("cherry", parent, run[-1], f"{run[0]}^"),
+        )
+    )
+    return copies[-1][2:] if copies else None
+
+
 @dataclass
 class BranchSnapshot:
     """A read-only, concurrently-gathered snapshot of one worktree's state, produced by
@@ -58,6 +123,7 @@ class BranchSnapshot:
     ahead_behind: tuple[int, int] | None
     pending: int
     rebase_in_progress: bool
+    stale_fork: str | None
 
 
 @dataclass
