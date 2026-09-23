@@ -91,6 +91,13 @@ The only same-rank edge is `_engine -> _guards`, because `_skip_empty_commits` c
   `git rebase --onto <target> <fork-commit>` + `git tree attach <target>` + `git tree propagate`.
   `--fork <commit>` on `attach` and `rebase` sets the boundary explicitly (`_resolve_fork_arg`,
   which refuses a non-ancestor of the branch, since `_get_fork_commit` would ignore it).
+  Without `--fork`, `attach` records the merge-base, except that re-attaching to the branch's
+  current parent keeps the recorded fork when it is still an ancestor of the branch and not an
+  ancestor of the merge-base (the parent was rewritten, so merge-base drifted below it). A
+  recorded fork below the merge-base is replaced, since `fork..merge-base` is already on the
+  parent and replaying it would conflict. A new parent always gets the merge-base, since the old
+  boundary was against a different branch. To reset a kept fork to the merge-base, pass it
+  explicitly: `attach <parent> --fork $(git merge-base <parent> <branch>)`.
 - **Stale fork** (`_stale_fork_boundary` in `_graph`, gate `_require_fresh_forks` in `_guards`):
   a branch that does not descend from its parent and whose replay range opens with its own copies
   of commits the parent gained since the fork, typically after the parent was rewritten and the

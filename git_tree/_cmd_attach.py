@@ -6,13 +6,15 @@ from typing import TYPE_CHECKING
 
 from git_tree._errors import TreeError
 from git_tree._git import (
+    _get_tree_parent,
     _register_child,
     _would_cycle,
     all_branch_names,
     current_branch,
+    git,
     git_ok,
 )
-from git_tree._graph import _resolve_fork_arg
+from git_tree._graph import _get_fork_commit, _resolve_fork_arg
 from git_tree._prompt import _require_input, _select_one
 from git_tree._registry import subcommand
 from git_tree._render import _set_completer
@@ -30,7 +32,9 @@ def arguments(p: argparse.ArgumentParser) -> None:
         "--fork",
         metavar="COMMIT",
         help="Record COMMIT (an ancestor of the branch) as the fork: the next propagate or "
-        "rebase replays only the commits after it. Default: merge-base with the parent",
+        "rebase replays only the commits after it. Default: merge-base with the parent, except "
+        "that re-attaching to the same parent keeps a recorded fork that is still an ancestor "
+        "of the branch and above the merge-base (pass the merge-base as COMMIT to reset it)",
     )
 
 
@@ -70,8 +74,19 @@ def cmd_attach(args: argparse.Namespace) -> None:
         )
 
     if args.fork is None:
-        _register_child(branch, parent)
-        print(f"Attached {branch} to {parent}")
+        kept_fork = None
+        if _get_tree_parent(branch) == parent:
+            recorded = _get_fork_commit(branch, parent)
+            merge_base = git("merge-base", parent, branch, check=False)
+            if (
+                recorded
+                and merge_base
+                and not git_ok("merge-base", "--is-ancestor", recorded, merge_base)
+            ):
+                kept_fork = recorded
+        _register_child(branch, parent, fork=kept_fork)
+        kept_note = f" (kept fork {kept_fork[:9]})" if kept_fork else ""
+        print(f"Attached {branch} to {parent}{kept_note}")
         return
     fork = _resolve_fork_arg(branch, args.fork)
     _register_child(branch, parent, fork=fork, warn_if_not_descendant=False)

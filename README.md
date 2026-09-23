@@ -212,11 +212,13 @@ git config branch.<root>.remote             <remote>          # the tree's one r
 
 The two keys answer two questions: `tree-parent-branch` is *which branch this one stacks
 on*, and `tree-fork-commit` is *where it forked from that parent* (the parent tip it was last
-rebased onto, set on `branch`/`attach`/`split` and updated after every successful rebase). The
-fork commit is what lets a rebase replay *only* the branch's own commits: once the parent
-moves ahead, `merge-base(parent, child)` drifts off the real fork point, so the stored commit
-is the only reliable boundary. That is what makes an interrupted propagate resumable and keeps
-a parent's reorder, split, or `git pull --rebase` from corrupting its descendants.
+rebased onto, set on `branch`/`attach`/`split` and updated after every successful rebase;
+re-attaching to the same parent keeps it while it is still an ancestor of the branch and above
+their merge-base). The fork commit is what lets a rebase replay *only* the branch's own
+commits: once the parent moves ahead, `merge-base(parent, child)` drifts off the real fork
+point, so the stored commit is the only reliable boundary. That is what makes an interrupted
+propagate resumable and keeps a parent's reorder, split, or `git pull --rebase` from
+corrupting its descendants.
 
 For details of what each subcommand does under the hood, see [AGENTS.md](AGENTS.md).
 

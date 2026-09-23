@@ -90,7 +90,8 @@ class TestAttach:
         """Attaching to a branch with no common history is a TreeError, not a traceback.
 
         Reaches _register_child's own "No common history" guard, which cmd_branch's
-        separate guard does not exercise (cmd_attach is the only caller passing fork=None)."""
+        separate guard does not exercise (cmd_attach is the only caller that can reach it
+        without a precomputed fork)."""
         orphan_wt = tmp_path / "orphan-wt"
         repo.git("worktree", "add", "--detach", str(orphan_wt))
         _git("checkout", "--orphan", "orphan", cwd=orphan_wt)
@@ -106,25 +107,30 @@ class TestAttach:
         err = capsys.readouterr().err
         assert "No common history" in err
 
+    def test_reattach_to_a_parent_with_disjoint_history_clean_error(
+        self, repo: RepoHelper, capsys, tmp_path
+    ) -> None:
+        """A recorded fork is only kept against a parent that still shares history."""
+        orphan_wt = tmp_path / "orphan-wt"
+        repo.git("worktree", "add", "--detach", str(orphan_wt))
+        _git("checkout", "--orphan", "orphan", cwd=orphan_wt)
+        (orphan_wt / "o.txt").write_text("orphan")
+        _git("add", "o.txt", cwd=orphan_wt)
+        _git("commit", "-m", "orphan root", cwd=orphan_wt)
+        repo.git("worktree", "remove", str(orphan_wt))
+        repo.git("config", "branch.orphan.tree-parent-branch", "main")
+        repo.git("config", "branch.orphan.tree-fork-commit", repo.git("rev-parse", "orphan"))
+
+        repo.checkout("orphan")
+        with pytest.raises(TreeError):
+            cmd_attach(_ns(parent="main"))
+
+        assert "No common history" in capsys.readouterr().err
+
 
 class TestAttachForkCommit:
-    @pytest.mark.xfail(
-        strict=True,
-        reason="_register_child (_git.py:177) always overwrites tree-fork-commit with "
-        "merge-base(parent, child), so re-attaching a branch to the parent it already has "
-        "replaces a still-valid recorded fork with the drifted merge-base. Once the parent has "
-        "been rewritten, merge-base falls below the branch's own commits and the next propagate "
-        "replays the parent's old commits too, which is precisely what the fork commit exists to "
-        "prevent (AGENTS.md, Dependency storage). It is reachable through the documented repair "
-        "path: the git-tree-doctor skill and README step 1 both reach for attach. Fix: in "
-        "cmd_attach, keep the stored fork when the parent is unchanged and the stored value is "
-        "still an ancestor of the branch (the validity test _get_fork_commit already applies at "
-        "_graph.py:40); recompute only when the parent actually changes, where the old boundary "
-        "refers to a different branch and is meaningless. The 'does not appear to descend' "
-        "warning already printed here is a hint, not a gate, and says nothing about the fork.",
-    )
     def test_reattaching_to_the_same_parent_keeps_a_valid_fork(
-        self, repo: RepoHelper, monkeypatch, tmp_path
+        self, repo: RepoHelper, monkeypatch, tmp_path, capsys
     ) -> None:
         """Attach is advertised as recording an edge, so it must not quietly widen the replay set.
 
@@ -147,8 +153,64 @@ class TestAttachForkCommit:
         cmd_attach(_ns(parent="main"))
 
         assert repo.git("config", "--get", "branch.b.tree-fork-commit") == m1
+        assert f"(kept fork {m1[:9]})" in capsys.readouterr().out
         fork = repo.git("config", "--get", "branch.b.tree-fork-commit")
         assert repo.git("log", "--oneline", f"{fork}..b").count("\n") == 0  # B1 alone
+
+    def test_reattaching_replaces_a_fork_below_the_merge_base(
+        self, repo: RepoHelper, monkeypatch, tmp_path
+    ) -> None:
+        """A child already rebased onto its parent with plain git re-attaches at the parent tip,
+        rather than keeping an older fork that would replay the parent's commits."""
+        repo.branch("b", parent="main")
+        wt_b = repo.worktree("b", str(tmp_path / "wt-b"))
+        (wt_b / "b1.txt").write_text("b1")
+        repo.git("add", "b1.txt", cwd=wt_b)
+        repo.git("commit", "-m", "B1", cwd=wt_b)
+        repo.commit("f.txt", "p1", "P1")
+        repo.commit("f.txt", "p2", "P2")
+        repo.git("rebase", "main", cwd=wt_b)
+
+        monkeypatch.chdir(wt_b)
+        cmd_attach(_ns(parent="main"))
+
+        assert repo.git("config", "--get", "branch.b.tree-fork-commit") == repo.head
+
+    def test_reattaching_keeps_a_fork_beside_the_merge_base(
+        self, repo: RepoHelper, monkeypatch, tmp_path
+    ) -> None:
+        """The parent was rewritten and then merged into the branch, so the recorded fork is
+        incomparable with the merge-base; it still bounds the branch's own commits."""
+        repo.commit("p.txt", "p", "P1")
+        p1 = repo.head
+        repo.branch("b", parent="main")
+        repo.git("config", "branch.b.tree-fork-commit", p1)
+        wt_b = repo.worktree("b", str(tmp_path / "wt-b"))
+        (wt_b / "b1.txt").write_text("b1")
+        repo.git("add", "b1.txt", cwd=wt_b)
+        repo.git("commit", "-m", "B1", cwd=wt_b)
+        repo.git("commit", "--amend", "-m", "P1 rewritten")
+        repo.git("merge", "--no-edit", "main", cwd=wt_b)
+
+        monkeypatch.chdir(wt_b)
+        cmd_attach(_ns(parent="main"))
+
+        assert repo.git("config", "--get", "branch.b.tree-fork-commit") == p1
+
+    def test_attaching_to_a_new_parent_recomputes_the_fork(self, repo: RepoHelper) -> None:
+        """The old fork bounds the replay against the old parent, so a new parent discards it."""
+        main_tip = repo.head
+        repo.git("checkout", "-b", "a")
+        repo.commit("a1.txt", "a1", "A1")
+        a_tip = repo.head
+        repo.git("checkout", "-b", "b")
+        repo.commit("b1.txt", "b1", "B1")
+        repo.set_parent("b", "main")
+        repo.git("config", "branch.b.tree-fork-commit", main_tip)
+
+        cmd_attach(_ns(parent="a"))
+
+        assert repo.git("config", "--get", "branch.b.tree-fork-commit") == a_tip
 
     def test_fork_flag_records_the_given_commit(
         self, repo: RepoHelper, monkeypatch, tmp_path, capsys
