@@ -47,8 +47,9 @@ makes that a no-op, leaving git-tree the only thing that writes remote refs.
 Draft, for each branch bottom-up:
 
 - a **title**, defaulting to that branch's headline commit subject in conventional-commit form
-- a **body**: one line of stack context ("Second of four stacked PRs, builds on #N") plus a sentence
-  or two on what that branch alone is responsible for
+- a **body** covering what that branch alone is responsible for, written by following the
+  `pr-description` skill. Never mention the stack, the parent PR, or a position in it: GitHub's stack
+  UI shows all of that, and the text would drift whenever the stack changes.
 
 Show them all to the user together and take accept-or-revise feedback per PR **before** creating
 anything. A body is public the moment its PR exists, and editing it later leaves the first version
@@ -60,10 +61,7 @@ in the PR's edit history.
 gh pr create --draft --base <parent> --head <branch> --title <title> --body-file <file>
 ```
 
-Bottom-up is required: each body cites its parent's PR number, which does not exist until the parent
-PR is created. Substitute that number into the next body just before creating it, using a **global**
-replace. A non-global `sed` rewrites only the first occurrence and ships the remaining placeholders
-live.
+Go bottom-up so PR numbers increase up the stack, matching the order a reviewer reads them in.
 
 `--draft` is the default; drop it only when asked. Do not assume drafts skip CI, which depends
 entirely on the repo's workflow triggers.
@@ -97,8 +95,6 @@ its git-tree parent. Report the stack number and the PR numbers in order.
 
 - Creating PRs before pushing: `gh pr create` fails on a branch the remote does not have, and
   letting `gh stack link` push instead hands remote-ref writes to a tool git-tree knows nothing of.
-- Creating top-down: the parent's number is unavailable for the child's body, so bodies end up wrong
-  or placeholder-ridden.
 - Linking by branch name: silently creates duplicate PRs carrying generated descriptions.
 
 ## After the stack exists
