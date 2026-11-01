@@ -35,6 +35,27 @@ context or emphasis the user passed via this skill's `args` at invocation; if it
 conflicts with something in `PLAN.md`, say so explicitly in the summary rather than silently
 picking one.
 
-## 3. Implement
+Say too whether you will orchestrate or implement directly (step 3), and how you will split the
+work.
 
-Follow the plan's structure. Run whatever verification section it specifies.
+## 3. Implement as an orchestrator
+
+Unless delegating would cost about as much as doing the work, delegate it to subagents and spend
+your own context on the plan-level picture: whether the pieces still add up to the plan. Ask for
+concise reports, read diffs rather than whole files, and have subagents run verbose commands.
+
+- **Briefs**: a subagent starts with none of your context, so name the `PLAN.md` section, files,
+  repository rules, and how to verify. It stops and reports rather than improvising, and ends with
+  what changed, any departure from the brief, and open questions.
+- **Review**: read every diff yourself against the plan, the repository's rules and patterns, and
+  general good practice, and send it back until it passes.
+- **Deviations**: decide tactical ones yourself; take anything that changes a plan decision, the
+  scope, or user-visible behavior to the user first, as in step 1.
+- **Progress log**: keep a `## Progress and deviations` section at the end of `PLAN.md`, updated as
+  units land. If it already exists, resume from it.
+- **Parallelism**: in a shared worktree, run subagents in parallel only across disjoint files, and
+  only you stage, commit, or touch branches. For more parallel work, you may give subagents their
+  own worktrees off this branch and merge their work back yourself.
+
+If you implement directly, hold your own work to the same review. Finish by running the plan's
+verification section and summarizing what was done, every deviation, and anything unresolved.
