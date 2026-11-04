@@ -50,7 +50,9 @@ Once the plan is approved:
 
 3. Write the approved plan into `<path>/PLAN.md`. If `PLAN.md` already exists there, ask the
    user what filename to use instead of overwriting it. Done right, this write is close to a
-   direct copy of phase 1's output, not a rewrite.
+   direct copy of phase 1's output, not a rewrite. If the implementing agent will run on
+   another machine, commit `PLAN.md` so it can be pulled, and state in the plan that the
+   implementer removes it in a final commit before review. Otherwise leave it untracked.
 
 4. Report the worktree path, the branch name, and that the plan file is in place. **Stop.**
 
