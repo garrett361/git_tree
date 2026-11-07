@@ -45,7 +45,7 @@ Once the plan is approved:
    git tree branch <path> <name> --parent <parent>
    ```
 
-   Name `<path>` `<repo-dir-name>-<branch-with-slashes-removed>`, as a sibling of the
+   Name `<path>` `<repo-dir-name>-<branch with each / replaced by ->`, as a sibling of the
    parent's own worktree directory.
 
 3. Write the approved plan into `<path>/PLAN.md`. If `PLAN.md` already exists there, ask the
