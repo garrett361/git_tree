@@ -45,6 +45,10 @@ Once the plan is approved:
    git tree branch <path> <name> --parent <parent>
    ```
 
+   If the parent has no worktree (e.g. a branch that exists only on the remote),
+   `git tree branch` refuses; fetch it and adopt it first with
+   `git tree branch <parent-path> <parent> --parent <parent-base>`.
+
    Name `<path>` `<repo-dir-name>-<branch with each / replaced by ->`, as a sibling of the
    parent's own worktree directory.
 
